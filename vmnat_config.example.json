@@ -1,0 +1,200 @@
+{
+    "meta": {
+        "version": 4
+    },
+    "settings": {
+        "interfaces": {
+            "ext": "vmbr0",
+            "int": "homo"
+        },
+        "commands": {
+            "pvesh": "pvesh",
+            "iptables": "iptables",
+            "iptables_save": "iptables-save",
+            "tc": "tc",
+            "qm": "qm",
+            "pct": "pct"
+        },
+        "behavior": {
+            "linux_ssh_port": "22",
+            "windows_rdp_port": "3389",
+            "postrouting_cidr": "10.10.0.0/16"
+        },
+        "operation_policy": {
+            "scope_allowed_ops": {
+                "vm": ["general", "hook", "nat", "tc", "power", "limit", "nickname", "xpf", "preview"],
+                "template": ["hook"],
+                "outside": []
+            },
+            "action_allowed_ops": {
+                "allow": ["general", "hook", "nat", "tc", "power", "limit", "nickname", "xpf", "preview"],
+                "ignore_explicit": ["general", "hook", "nat", "tc", "power", "limit", "nickname", "xpf", "preview"],
+                "ignore_batch": []
+            },
+            "outside_ignore_explicit": true
+        },
+        "port_conflict_policy": {
+            "mode": "priority-remap",
+            "priority": {
+                "global_rule": 100,
+                "profile": 200,
+                "vm_rule": 300,
+                "custom": 400
+            },
+            "profile_priority": {
+                "trinet": 10,
+                "gpu-lab": 20
+            },
+            "remap_range": {
+                "start": 45000,
+                "end": 65000
+            }
+        },
+        "vmid_policy": {
+            "vm_ranges": [
+                {
+                    "start": 100,
+                    "end": 199
+                }
+            ],
+            "template_ranges": [
+                {
+                    "start": 1000,
+                    "end": 1099
+                }
+            ],
+            "outside_default_action": "ignore",
+            "id_actions": {
+                "250": "allow",
+                "251": "ignore",
+                "252": "deny"
+            }
+        },
+        "id_ip_rules": [
+            {
+                "name": "custom-map",
+                "enabled": true,
+                "map": {
+                    "101": "10.10.10.11",
+                    "102": "10.10.10.12"
+                }
+            },
+            {
+                "name": "default-10.10",
+                "enabled": true,
+                "pattern": "^([1-9]\\d{2})$",
+                "template": "10.10.{id_div_10}.{id_mod_10}"
+            }
+        ],
+        "port_forward_rules": [
+            {
+                "name": "default-admin",
+                "enabled": true,
+                "vmid_min": 100,
+                "vmid_max": 199,
+                "protocols": ["tcp", "udp"],
+                "ext": "{base_port}",
+                "int": "{default_ssh_port}"
+            },
+            {
+                "name": "default-range",
+                "enabled": true,
+                "vmid_min": 100,
+                "vmid_max": 199,
+                "protocols": ["tcp", "udp"],
+                "ext": "{base_port_plus1}:{base_port_plus99}",
+                "int": "{base_port_plus1}-{base_port_plus99}"
+            },
+            {
+                "name": "app-http",
+                "enabled": true,
+                "vmid_regex": "^2\\d{2}$",
+                "protocols": ["tcp"],
+                "ext": "8{id}",
+                "int": "80"
+            }
+        ],
+        "extra_forward_profiles": [
+            {
+                "id": "trinet",
+                "name": "三网端口",
+                "enabled": true,
+                "vmid_min": 100,
+                "vmid_max": 999,
+                "default_start": 31000,
+                "per_vm_size": 20,
+                "protocols": ["tcp", "udp"],
+                "entries": [
+                    {
+                        "ext": "{profile_start}",
+                        "int": "{default_ssh_port}"
+                    },
+                    {
+                        "ext": "{profile_start_plus1}:{profile_end}",
+                        "int": "{profile_start_plus1}-{profile_end}"
+                    }
+                ]
+            },
+            {
+                "id": "gpu-lab",
+                "name": "GPU实验端口",
+                "enabled": true,
+                "vmid_min": 200,
+                "vmid_max": 260,
+                "default_start": 40000,
+                "per_vm_size": 10,
+                "protocols": ["tcp"],
+                "entries": [
+                    {
+                        "ext": "{profile_start}",
+                        "int": "22"
+                    },
+                    {
+                        "ext": "{profile_start_plus1}:{profile_end}",
+                        "int": "6000-6008"
+                    }
+                ]
+            }
+        ]
+    },
+    "global_limits": [
+        {
+            "days": [1, 2, 3, 4, 5],
+            "s": 8,
+            "e": 23,
+            "dn": "200mbit",
+            "up": "50mbit"
+        }
+    ],
+    "vms": {
+        "101": {
+            "nickname": "gateway",
+            "ip": "10.10.10.11",
+            "profile_overrides": {
+                "trinet": {
+                    "enabled": true,
+                    "range_override": "31000-31019"
+                },
+                "gpu-lab": {
+                    "enabled": false
+                }
+            },
+            "custom_ports": [
+                {
+                    "ext": "50080",
+                    "int": "80",
+                    "proto": "tcp"
+                }
+            ],
+            "port_rules": [
+                {
+                    "name": "vm-special",
+                    "enabled": true,
+                    "protocols": ["tcp"],
+                    "ext": "51{id}",
+                    "int": "8080"
+                }
+            ]
+        }
+    }
+}

@@ -1,0 +1,33 @@
+name: Sync Release Tag
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  sync-tag-file:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Write RELEASE_TAG
+        run: |
+          echo "${{ github.event.release.tag_name }}" > RELEASE_TAG
+
+      - name: Commit and push if changed
+        run: |
+          if git diff --quiet RELEASE_TAG; then
+            echo "No change"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add RELEASE_TAG
+          git commit -m "chore: sync RELEASE_TAG to ${{ github.event.release.tag_name }}"
+          git push origin main
