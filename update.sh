@@ -41,6 +41,19 @@ cleanup() {
     fi
 }
 
+resolve_extracted_dir() {
+    local base_dir="$1"
+    local candidate=""
+    for candidate in "$base_dir"/*; do
+        [[ -d "$candidate" ]] || continue
+        if [[ -f "$candidate/vmmgrctl.py" && -d "$candidate/vmmgr_core" ]]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
 http_get() {
     local url="$1"
     local out="$2"
@@ -118,7 +131,7 @@ prepare_source() {
 
     unzip -q "$zip_path" -d "$WORK_DIR"
     local extracted
-    extracted="$(find "$WORK_DIR" -maxdepth 1 -mindepth 1 -type d | head -n 1)"
+    extracted="$(resolve_extracted_dir "$WORK_DIR" || true)"
     if [[ -z "$extracted" ]]; then
         echo "错误: 解压后未找到目录"
         exit 1
@@ -130,6 +143,7 @@ prepare_source() {
 
 install_files() {
     mkdir -p "$INSTALL_DIR"
+    rm -rf "$INSTALL_DIR/vmmgr_core"
     mkdir -p "$INSTALL_DIR/vmmgr_core"
 
     install -m 0755 "$SRC_DIR/vmmgrctl.py" "$INSTALL_DIR/vmmgrctl.py"
@@ -138,6 +152,14 @@ install_files() {
 
     # 清理无用或历史残留文件
     rm -f "$INSTALL_DIR/README.md" "$INSTALL_DIR/vmnat_config.example.json" "$INSTALL_DIR/vmnat_utils.py"
+}
+
+ensure_cron() {
+    [[ "${AUTO_CRON_SYNC_TC:-1}" != "1" ]] && return 0
+    local cron_line="* * * * * $INSTALL_DIR/vmmgrctl.py --config $CONFIG_PATH sync_all --type tc >/dev/null 2>&1; $INSTALL_DIR/vmmgrctl.py --config $CONFIG_PATH dyn_tc_check >/dev/null 2>&1; $INSTALL_DIR/vmmgrctl.py --config $CONFIG_PATH alert_check --json >/dev/null 2>&1; $INSTALL_DIR/vmmgrctl.py --config $CONFIG_PATH cleanup_auto --json >/dev/null 2>&1"
+    if ! crontab -l 2>/dev/null | grep -Fq "$cron_line"; then
+        (crontab -l 2>/dev/null; echo "$cron_line") | crontab -
+    fi
 }
 
 write_meta() {
@@ -246,6 +268,7 @@ if [[ "$SKIP_UPDATE" == "1" ]]; then
 fi
 install_files
 write_meta
+ensure_cron
 
 echo "更新完成"
 echo "  已更新: $INSTALL_DIR/vmmgr"

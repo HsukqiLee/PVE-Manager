@@ -44,6 +44,19 @@ cleanup() {
     fi
 }
 
+resolve_extracted_dir() {
+    local base_dir="$1"
+    local candidate=""
+    for candidate in "$base_dir"/*; do
+        [[ -d "$candidate" ]] || continue
+        if [[ -f "$candidate/vmmgrctl.py" && -d "$candidate/vmmgr_core" ]]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
 need_cmd() {
     command -v "$1" >/dev/null 2>&1 || {
         echo "错误: 缺少命令: $1"
@@ -118,7 +131,7 @@ prepare_source() {
     unzip -q "$zip_path" -d "$WORK_DIR"
 
     local extracted
-    extracted="$(find "$WORK_DIR" -maxdepth 1 -mindepth 1 -type d | head -n 1)"
+    extracted="$(resolve_extracted_dir "$WORK_DIR" || true)"
     if [[ -z "$extracted" ]]; then
         echo "错误: 解压后未找到目录"
         exit 1
@@ -129,6 +142,7 @@ prepare_source() {
 
 install_files() {
     mkdir -p "$INSTALL_DIR"
+    rm -rf "$INSTALL_DIR/vmmgr_core"
     mkdir -p "$INSTALL_DIR/vmmgr_core"
     mkdir -p "$(dirname "$CONFIG_PATH")"
     mkdir -p "$(dirname "$INSTALL_META")"
@@ -139,6 +153,68 @@ install_files() {
 
     # 清理无用或历史残留文件
     rm -f "$INSTALL_DIR/README.md" "$INSTALL_DIR/vmnat_config.example.json" "$INSTALL_DIR/vmnat_utils.py"
+}
+
+ensure_rich_dep() {
+    local py_cmd=""
+    if command -v python3 >/dev/null 2>&1; then
+        py_cmd="python3"
+    elif command -v python >/dev/null 2>&1; then
+        py_cmd="python"
+    else
+        echo "警告: 未找到 python 解释器，跳过 rich 依赖检查"
+        return 0
+    fi
+
+    if "$py_cmd" -c "import rich" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    echo "检测到缺少 rich，尝试自动安装..."
+    if "$py_cmd" -m pip install -q rich; then
+        echo "已安装 rich"
+        return 0
+    fi
+
+    echo "警告: 自动安装 rich 失败，请手动执行: $py_cmd -m pip install rich"
+    return 0
+}
+
+ensure_vn_tools() {
+    local missing=0
+    command -v vnstat >/dev/null 2>&1 || missing=1
+    command -v vnstati >/dev/null 2>&1 || missing=1
+    [[ "$missing" == "0" ]] && return 0
+
+    echo "检测到缺少 vnstat/vnstati，尝试自动安装..."
+    if command -v apt-get >/dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive apt-get update -y >/dev/null 2>&1 || true
+        DEBIAN_FRONTEND=noninteractive apt-get install -y vnstat >/dev/null 2>&1 || true
+    fi
+
+    if command -v vnstat >/dev/null 2>&1 && command -v vnstati >/dev/null 2>&1; then
+        echo "已安装 vnstat/vnstati"
+        return 0
+    fi
+
+    echo "警告: vnstat/vnstati 未就绪，动态限速与图表功能不可用"
+    echo "建议手动安装: apt-get install -y vnstat"
+    return 0
+}
+
+ensure_conntrack_tool() {
+    if command -v conntrack >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if command -v apt-get >/dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y conntrack >/dev/null 2>&1 || true
+    fi
+
+    if ! command -v conntrack >/dev/null 2>&1; then
+        echo "警告: 未找到 conntrack，连接数统计功能不可用"
+    fi
+    return 0
 }
 
 write_default_config() {
@@ -159,12 +235,61 @@ write_default_config() {
             "iptables_save": "iptables-save",
             "tc": "tc",
             "qm": "qm",
-            "pct": "pct"
+            "pct": "pct",
+            "vnstat": "vnstat",
+            "vnstati": "vnstati",
+            "conntrack": "conntrack"
         },
         "behavior": {
             "linux_ssh_port": "22",
             "windows_rdp_port": "3389",
             "postrouting_cidr": "10.10.0.0/16"
+        },
+        "dynamic_tc": {
+            "enabled": false,
+            "state_file": "/var/lib/vmmgr/dyn_tc_state.json",
+            "rules": [
+                {
+                    "name": "default-burst-control",
+                    "enabled": false,
+                    "vmid_min": 100,
+                    "vmid_max": 199,
+                    "window_minutes": 10,
+                    "rx_threshold_mib": 2048,
+                    "tx_threshold_mib": 1024,
+                    "throttle_minutes": 30,
+                    "cooldown_minutes": 30,
+                    "throttle_dn_mbit": "50mbit",
+                    "throttle_up_mbit": "20mbit"
+                }
+            ]
+        },
+        "monitoring": {
+            "alerts": {
+                "enabled": false,
+                "node_cpu_pct": 90,
+                "node_mem_pct": 90,
+                "node_disk_pct": 90,
+                "vm_conn_total": 5000,
+                "vm_conn_inbound": 3000,
+                "vm_conn_outbound": 3000
+            },
+            "cleanup": {
+                "enabled": false,
+                "report_dirs": ["/tmp/vnstati_batch"],
+                "report_keep_days": 7,
+                "snapshot_dirs": ["/tmp", "/var/lib/vmmgr/snapshots"],
+                "snapshot_keep_days": 7
+            },
+            "snapshot": {
+                "enabled": true,
+                "dir": "/var/lib/vmmgr/snapshots",
+                "keep_days": 7
+            },
+            "api": {
+                "schema": "pvemgr.api.v1",
+                "source": "pvemgr"
+            }
         },
         "operation_policy": {
             "scope_allowed_ops": {
@@ -283,10 +408,30 @@ EOF
 
 ensure_cron() {
     [[ "$ENABLE_CRON" != "1" ]] && return 0
-    local cron_line="0 * * * * $INSTALL_DIR/vmmgrctl.py --config $CONFIG_PATH sync_all --type tc >/dev/null 2>&1"
+    local cron_line="* * * * * $INSTALL_DIR/vmmgrctl.py --config $CONFIG_PATH sync_all --type tc >/dev/null 2>&1; $INSTALL_DIR/vmmgrctl.py --config $CONFIG_PATH dyn_tc_check >/dev/null 2>&1; $INSTALL_DIR/vmmgrctl.py --config $CONFIG_PATH alert_check --json >/dev/null 2>&1; $INSTALL_DIR/vmmgrctl.py --config $CONFIG_PATH cleanup_auto --json >/dev/null 2>&1"
     if ! crontab -l 2>/dev/null | grep -Fq "$cron_line"; then
         (crontab -l 2>/dev/null; echo "$cron_line") | crontab -
     fi
+}
+
+init_hook_script() {
+    local hook_path=""
+    local err_file=""
+    err_file="$(mktemp)"
+    if hook_path="$("$INSTALL_DIR/vmmgrctl.py" --config "$CONFIG_PATH" ensure_hook_script 2>"$err_file")"; then
+        rm -f "$err_file"
+        echo "已初始化 Hook 脚本: ${hook_path}"
+        return 0
+    fi
+
+    local err_out=""
+    err_out="$(cat "$err_file" 2>/dev/null || true)"
+    rm -f "$err_file"
+
+    echo "警告: Hook 脚本初始化失败，可稍后手动执行:"
+    echo "  $INSTALL_DIR/vmmgrctl.py --config $CONFIG_PATH ensure_hook_script"
+    [[ -n "$err_out" ]] && echo "  详情: $err_out"
+    return 0
 }
 
 while [[ $# -gt 0 ]]; do
@@ -363,7 +508,11 @@ fi
 install_files
 write_default_config
 write_meta
+ensure_rich_dep
+ensure_vn_tools
+ensure_conntrack_tool
 ensure_cron
+init_hook_script
 
 echo "安装完成"
 echo "  vmmgr: $INSTALL_DIR/vmmgr"

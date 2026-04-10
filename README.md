@@ -1,4 +1,4 @@
-# pvemgr
+# PVE-Manager
 
 PVE 管理脚本，支持菜单化管理 NAT、端口转发、额外端口转发配置、动态限速、昵称、电源控制。
 
@@ -10,8 +10,20 @@ PVE 管理脚本，支持菜单化管理 NAT、端口转发、额外端口转发
 - 额外转发 Profile: 可配置多个“命名端口转发组”（例如“三网端口”“GPU实验端口”）。
 - VMID 精细策略: 支持 vm 范围、模板范围、范围外默认动作、单独 id 动作。
 - 配置校验与预演: 支持 `validate`、`preview_rules`、`backup_config`。
+- 每分钟自动任务: `sync_all --type tc` + `dyn_tc_check`。
+- 动态限速引擎: 基于 `vnstat` 的阈值触发、自动解除、冷却期控制。
+- 流量图表导出: 基于 `vnstati` 生成小时/日/月/汇总图。
 - 兼容旧配置: 旧版平铺结构会自动迁移到新版结构。
 - 多模块架构: 核心逻辑拆分为 `vmmgr_core/config.py`、`vmmgr_core/policy.py`、`vmmgr_core/rules.py`、`vmmgr_core/ops.py`、`vmmgr_core/ui.py`、`vmmgr_core/cli.py`。
+
+## 依赖
+
+- Python3 + pip
+- `rich`
+- `vnstat`（含 `vnstati`）
+- `conntrack`（连接数统计）
+
+`install.sh` 会尝试自动安装缺失依赖；失败时会打印手动安装提示。
 
 ## 安装
 
@@ -70,7 +82,7 @@ chmod +x install.sh update.sh
 - `--install-dir PATH`: 安装目录。
 - `--config PATH`: 配置文件路径。
 - `--meta PATH`: 安装元数据路径。
-- `--disable-cron`: 不自动注册每小时 tc 同步任务。
+- `--disable-cron`: 不自动注册每分钟任务（tc 同步 + 动态限速检查）。
 
 安装后可直接运行:
 
@@ -129,9 +141,17 @@ chmod +x install.sh update.sh
 - `settings.vmid_policy`: VMID 精细策略（vm/template/outside + allow/ignore/deny）。
 - `settings.operation_policy`: 操作语义策略（模板允许哪些操作、ignore 是否允许单点放行）。
 - `settings.port_conflict_policy`: 端口冲突策略（优先级、自动避让、严格报错）。
+- `settings.dynamic_tc`: 动态限速策略（vnstat 阈值、限速时长、冷却时长、限速值）。
+- `settings.monitoring`: 监控策略（告警阈值、快照策略、自动清理、API schema/source）。
 - `vms.<vmid>.port_rules`: 单 VM 的规则扩展。
 - `vms.<vmid>.custom_ports`: 菜单中维护的自定义映射。
 - `vms.<vmid>.profile_overrides`: 针对某个 profile 的启停和范围覆写。
+
+### Hook 脚本
+
+- Hook 绑定文件名为 `local:snippets/hook.py`。
+- 在菜单执行 Hook 绑定时，会自动创建/更新 `/var/lib/vz/snippets/hook.py`。
+- `hook.py` 会把生命周期事件转发给 `vmmgrctl.py hook --vmid <id> --phase <phase>`。
 
 ### VMID 精细策略
 
@@ -234,7 +254,67 @@ chmod +x install.sh update.sh
 
 # 备份配置
 /usr/local/bin/vmmgrctl.py backup_config
+
+# 动态限速: 立即执行一次检查
+/usr/local/bin/vmmgrctl.py dyn_tc_check
+
+# 查看动态限速状态
+/usr/local/bin/vmmgrctl.py dyn_tc_status
+
+# 手动解除某台 VM 的动态限速
+/usr/local/bin/vmmgrctl.py dyn_tc_release --vmid 101
+
+# 动态引擎开关
+/usr/local/bin/vmmgrctl.py dyn_engine --enabled 1
+
+# 动态规则 CRUD
+/usr/local/bin/vmmgrctl.py dyn_rule_list
+/usr/local/bin/vmmgrctl.py dyn_rule_add --name burst-protect --vmid-min 100 --vmid-max 199 --window 10 --rx 3072 --tx 1536 --throttle 30 --cooldown 20 --dn 80mbit --up 30mbit --enabled 1
+/usr/local/bin/vmmgrctl.py dyn_rule_edit --idx 0 --rx 4096 --tx 2048
+/usr/local/bin/vmmgrctl.py dyn_rule_toggle --idx 0 --enabled 0
+/usr/local/bin/vmmgrctl.py dyn_rule_del --idx 0
+
+# 动态规则预设模板（home/idc/night）
+/usr/local/bin/vmmgrctl.py dyn_rule_preset --preset home --vmid-min 100 --vmid-max 199 --enabled 1
+
+# 生成 vnstat 图表（summary/hour/day/month/top）
+/usr/local/bin/vmmgrctl.py vnstat_report --vmid 101 --mode day --limit 7 --out /tmp/vm101_day.png
+
+# 查看连接数统计（基于 conntrack）
+/usr/local/bin/vmmgrctl.py conn_stats --vmid 101
+
+# 批量流量图导出
+/usr/local/bin/vmmgrctl.py batch_vnstat_report --input "all,101,105-110" --mode day --limit 7 --out-dir /tmp/vnstati_batch
+
+# 批量连接统计
+/usr/local/bin/vmmgrctl.py batch_conn_stats --input "all,101,105-110"
+
+# 节点健康（CPU/内存/磁盘/load）
+/usr/local/bin/vmmgrctl.py node_health
+
+# 监控快照导出（总览+动态状态+节点健康）
+/usr/local/bin/vmmgrctl.py monitor_snapshot --out /tmp/vmmgr_snapshot.json
+
+# 告警检查（命中阈值将写入审计日志；可自动生成告警快照）
+/usr/local/bin/vmmgrctl.py alert_check
+
+# 自动清理（按保留天数清理历史图表/快照）
+/usr/local/bin/vmmgrctl.py cleanup_auto
+
+# 统一 API 导出（schema 固定，便于对接 Telegram/企业微信/Webhook）
+/usr/local/bin/vmmgrctl.py api_export --type overview --out /tmp/vmmgr_api_overview.json
+/usr/local/bin/vmmgrctl.py api_export --type alerts --out /tmp/vmmgr_api_alerts.json
+/usr/local/bin/vmmgrctl.py api_export --type conn --input "all,101,105-110" --out /tmp/vmmgr_api_conn.json
+
+# 监控总览
+/usr/local/bin/vmmgrctl.py monitor_overview
 ```
+
+## 交互优化
+
+- 主菜单新增 `12. 监控中心`。
+- 监控中心内置动态规则增删改查、预设模板、引擎开关、立即检查、状态查看、单台/批量图表、单台/批量连接统计、节点健康、快照导出、告警检查、自动清理、API 导出、总览。
+- 限速菜单保留快捷操作，监控中心用于完整运维管理。
 
 ### 功能清单
 

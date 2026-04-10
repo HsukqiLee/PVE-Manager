@@ -49,7 +49,8 @@ def get_os_nickname(vm_name, conf_nick):
 def has_hook(vmid):
     for p in [f"/etc/pve/lxc/{vmid}.conf", f"/etc/pve/qemu-server/{vmid}.conf"]:
         try:
-            if "nat_hook.py" in open(p, "r", encoding="utf-8", errors="ignore").read():
+            text = open(p, "r", encoding="utf-8", errors="ignore").read()
+            if "hook.py" in text or "nat_hook.py" in text:
                 return True
         except Exception:
             pass
@@ -138,6 +139,7 @@ def render_main_menu(conf, all_vms, current_limit_func, show_panel=True):
             "[bold yellow]9.[/] 网络重置",
             "[bold magenta]10.[/] 配置校验",
             "[bold magenta]11.[/] 规则预览",
+            "[bold blue]12.[/] 监控中心",
             "[bold red]0.[/] 退出系统",
         ]
         if compact:

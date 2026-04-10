@@ -17,11 +17,60 @@ def default_config():
                 "tc": "tc",
                 "qm": "qm",
                 "pct": "pct",
+                "vnstat": "vnstat",
+                "vnstati": "vnstati",
+                "conntrack": "conntrack",
             },
             "behavior": {
                 "linux_ssh_port": "22",
                 "windows_rdp_port": "3389",
                 "postrouting_cidr": "10.10.0.0/16",
+            },
+            "dynamic_tc": {
+                "enabled": False,
+                "state_file": "/var/lib/vmmgr/dyn_tc_state.json",
+                "rules": [
+                    {
+                        "name": "default-burst-control",
+                        "enabled": False,
+                        "vmid_min": 100,
+                        "vmid_max": 199,
+                        "window_minutes": 10,
+                        "rx_threshold_mib": 2048,
+                        "tx_threshold_mib": 1024,
+                        "throttle_minutes": 30,
+                        "cooldown_minutes": 30,
+                        "throttle_dn_mbit": "50mbit",
+                        "throttle_up_mbit": "20mbit",
+                    }
+                ],
+            },
+            "monitoring": {
+                "alerts": {
+                    "enabled": False,
+                    "node_cpu_pct": 90,
+                    "node_mem_pct": 90,
+                    "node_disk_pct": 90,
+                    "vm_conn_total": 5000,
+                    "vm_conn_inbound": 3000,
+                    "vm_conn_outbound": 3000,
+                },
+                "cleanup": {
+                    "enabled": False,
+                    "report_dirs": ["/tmp/vnstati_batch"],
+                    "report_keep_days": 7,
+                    "snapshot_dirs": ["/tmp", "/var/lib/vmmgr/snapshots"],
+                    "snapshot_keep_days": 7,
+                },
+                "snapshot": {
+                    "enabled": True,
+                    "dir": "/var/lib/vmmgr/snapshots",
+                    "keep_days": 7,
+                },
+                "api": {
+                    "schema": "pvemgr.api.v1",
+                    "source": "pvemgr",
+                },
             },
             "operation_policy": {
                 "scope_allowed_ops": {
@@ -191,8 +240,10 @@ def save_config(data, config_file):
             vms.items(), key=lambda item: int(item[0]) if str(item[0]).isdigit() else 999999
         )
     }
-    with open(config_file, "w", encoding="utf-8") as f:
+    tmp_file = f"{config_file}.tmp"
+    with open(tmp_file, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=4, ensure_ascii=False)
+    os.replace(tmp_file, config_file)
 
 
 def parse_days(s):

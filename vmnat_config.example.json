@@ -13,12 +13,61 @@
             "iptables_save": "iptables-save",
             "tc": "tc",
             "qm": "qm",
-            "pct": "pct"
+            "pct": "pct",
+            "vnstat": "vnstat",
+            "vnstati": "vnstati",
+            "conntrack": "conntrack"
         },
         "behavior": {
             "linux_ssh_port": "22",
             "windows_rdp_port": "3389",
             "postrouting_cidr": "10.10.0.0/16"
+        },
+        "dynamic_tc": {
+            "enabled": true,
+            "state_file": "/var/lib/vmmgr/dyn_tc_state.json",
+            "rules": [
+                {
+                    "name": "burst-protect",
+                    "enabled": true,
+                    "vmid_min": 100,
+                    "vmid_max": 199,
+                    "window_minutes": 10,
+                    "rx_threshold_mib": 3072,
+                    "tx_threshold_mib": 1536,
+                    "throttle_minutes": 30,
+                    "cooldown_minutes": 20,
+                    "throttle_dn_mbit": "80mbit",
+                    "throttle_up_mbit": "30mbit"
+                }
+            ]
+        },
+        "monitoring": {
+            "alerts": {
+                "enabled": true,
+                "node_cpu_pct": 90,
+                "node_mem_pct": 90,
+                "node_disk_pct": 90,
+                "vm_conn_total": 5000,
+                "vm_conn_inbound": 3000,
+                "vm_conn_outbound": 3000
+            },
+            "cleanup": {
+                "enabled": true,
+                "report_dirs": ["/tmp/vnstati_batch"],
+                "report_keep_days": 7,
+                "snapshot_dirs": ["/tmp", "/var/lib/vmmgr/snapshots"],
+                "snapshot_keep_days": 7
+            },
+            "snapshot": {
+                "enabled": true,
+                "dir": "/var/lib/vmmgr/snapshots",
+                "keep_days": 7
+            },
+            "api": {
+                "schema": "pvemgr.api.v1",
+                "source": "pvemgr"
+            }
         },
         "operation_policy": {
             "scope_allowed_ops": {

@@ -416,6 +416,75 @@ def validate_config(conf, sample_vmids=None, get_all_vms_func=None):
             continue
         check_rule_ports(p["entries"], f"profile[{pid}].entries")
 
+    dyn = conf.get("settings", {}).get("dynamic_tc", {})
+    dyn_rules = dyn.get("rules", [])
+    if dyn and not isinstance(dyn_rules, list):
+        errors.append("dynamic_tc.rules 必须是列表")
+    for idx, r in enumerate(dyn_rules if isinstance(dyn_rules, list) else []):
+        if not isinstance(r, dict):
+            errors.append(f"dynamic_tc.rules[{idx}] 必须是对象")
+            continue
+        if not str(r.get("name", "")).strip():
+            errors.append(f"dynamic_tc.rules[{idx}] 缺少 name")
+        for k in ["window_minutes", "throttle_minutes", "cooldown_minutes"]:
+            try:
+                v = int(r.get(k, 0))
+                if v < 0:
+                    errors.append(f"dynamic_tc.rules[{idx}].{k} 不能为负数")
+            except Exception:
+                errors.append(f"dynamic_tc.rules[{idx}].{k} 必须是整数")
+        for k in ["rx_threshold_mib", "tx_threshold_mib"]:
+            try:
+                float(r.get(k, 0))
+            except Exception:
+                errors.append(f"dynamic_tc.rules[{idx}].{k} 必须是数字")
+        for k in ["throttle_dn_mbit", "throttle_up_mbit"]:
+            val = str(r.get(k, ""))
+            if val and not re.match(r"^\d+(\.\d+)?mbit$", val):
+                errors.append(f"dynamic_tc.rules[{idx}].{k} 必须是类似 50mbit 的格式")
+
+    mon = conf.get("settings", {}).get("monitoring", {})
+    if mon and not isinstance(mon, dict):
+        errors.append("monitoring 必须是对象")
+    alerts_cfg = mon.get("alerts", {}) if isinstance(mon, dict) else {}
+    cleanup_cfg = mon.get("cleanup", {}) if isinstance(mon, dict) else {}
+    snapshot_cfg = mon.get("snapshot", {}) if isinstance(mon, dict) else {}
+
+    for k in ["node_cpu_pct", "node_mem_pct", "node_disk_pct"]:
+        if k in alerts_cfg:
+            try:
+                v = float(alerts_cfg.get(k, 0))
+                if v < 0 or v > 100:
+                    errors.append(f"monitoring.alerts.{k} 必须在 0-100")
+            except Exception:
+                errors.append(f"monitoring.alerts.{k} 必须是数字")
+
+    for k in ["vm_conn_total", "vm_conn_inbound", "vm_conn_outbound"]:
+        if k in alerts_cfg:
+            try:
+                v = int(alerts_cfg.get(k, 0))
+                if v < 0:
+                    errors.append(f"monitoring.alerts.{k} 不能为负数")
+            except Exception:
+                errors.append(f"monitoring.alerts.{k} 必须是整数")
+
+    for k in ["report_keep_days", "snapshot_keep_days"]:
+        if k in cleanup_cfg:
+            try:
+                v = int(cleanup_cfg.get(k, 0))
+                if v < 0:
+                    errors.append(f"monitoring.cleanup.{k} 不能为负数")
+            except Exception:
+                errors.append(f"monitoring.cleanup.{k} 必须是整数")
+
+    if "keep_days" in snapshot_cfg:
+        try:
+            v = int(snapshot_cfg.get("keep_days", 0))
+            if v < 0:
+                errors.append("monitoring.snapshot.keep_days 不能为负数")
+        except Exception:
+            errors.append("monitoring.snapshot.keep_days 必须是整数")
+
     for vmid, vmc in conf.get("vms", {}).items():
         if not str(vmid).isdigit():
             errors.append(f"vms 存在非法键: {vmid}")

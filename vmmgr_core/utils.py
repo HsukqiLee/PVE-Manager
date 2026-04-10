@@ -16,9 +16,11 @@ def audit(msg):
 
 
 def run_cmd(cmd):
+    if isinstance(cmd, str):
+        cmd = ["/bin/sh", "-c", cmd]
     return subprocess.run(
         cmd,
-        shell=True,
+        shell=False,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
