@@ -9,9 +9,10 @@ def get_vm_conf(conf, vmid):
     return conf.setdefault("vms", {}).setdefault(str(vmid), {})
 
 
-def build_context(vmid, groups=None, default_ssh_port="22", profile_start="0", profile_end="0"):
+def build_context(vmid, groups=None, default_ssh_port="22", profile_start="0", profile_end="0", ips=None):
     v = int(vmid)
     groups = groups or []
+    ips = ips or {}
     context = {
         "id": str(v),
         "id_div_10": str(v // 10),
@@ -27,6 +28,8 @@ def build_context(vmid, groups=None, default_ssh_port="22", profile_start="0", p
         "profile_end": str(profile_end),
         "profile_start_plus1": str(int(profile_start) + 1),
     }
+    for k, v_ip in ips.items():
+        context[f"{k}_ip"] = str(v_ip)
     for i, g in enumerate(groups, start=1):
         context[f"g{i}"] = g
     return context
@@ -71,8 +74,14 @@ def validate_port_expr(expr, allow_template=False):
     return bool(re.match(r"^\d+([:-]\d+)?$", s))
 
 
-def apply_ip_rule(rule, vmid):
+def apply_ip_rule(rule, vmid, scope="biz"):
     if not rule.get("enabled", True):
+        return None
+
+    # If the rule specifies a scope, it must match.
+    # If the rule doesn't specify a scope, we assume it's for the "biz" scope (legacy behavior).
+    rule_scope = rule.get("scope", "biz")
+    if rule_scope != scope:
         return None
 
     if "map" in rule and isinstance(rule["map"], dict):
@@ -91,21 +100,38 @@ def apply_ip_rule(rule, vmid):
     return None
 
 
-def get_vm_ip(vmid, conf):
+def get_vm_ip(vmid, conf, scope="biz"):
     if not vmid_allowed(vmid, conf, operation="hook", explicit=True, batch=False):
         return "None"
 
     vm_conf = get_vm_conf(conf, vmid)
-    if vm_conf.get("ip"):
+    # 1. Direct match in ips dict
+    if "ips" in vm_conf and isinstance(vm_conf["ips"], dict):
+        if scope in vm_conf["ips"]:
+            return vm_conf["ips"][scope]
+
+    # 2. Legacy "ip" field (defaults to "biz" scope)
+    if scope == "biz" and vm_conf.get("ip"):
         return vm_conf["ip"]
 
+    # 3. Rule-based lookup
     rules = vm_conf.get("id_ip_rules") or conf.get("settings", {}).get("id_ip_rules", [])
     for rule in rules:
-        ip = apply_ip_rule(rule, vmid)
+        ip = apply_ip_rule(rule, vmid, scope=scope)
         if ip:
             return ip
 
     return "None"
+
+
+def get_vm_all_ips(vmid, conf):
+    scopes = ["biz", "mgmt"]
+    res = {}
+    for s in scopes:
+        ip = get_vm_ip(vmid, conf, scope=s)
+        if ip != "None":
+            res[s] = ip
+    return res
 
 
 def detect_default_ssh_port(vmid, conf):
@@ -212,7 +238,8 @@ def expand_extra_profile_rules(vmid, conf, vm_conf):
 
 def expand_port_rules(vmid, conf, vm_conf):
     default_ssh = detect_default_ssh_port(vmid, conf)
-    ctx = build_context(vmid, default_ssh_port=default_ssh)
+    ips = get_vm_all_ips(vmid, conf)
+    ctx = build_context(vmid, default_ssh_port=default_ssh, ips=ips)
 
     rules = conf.get("settings", {}).get("port_forward_rules", [])
     vm_rules = vm_conf.get("port_rules", [])
@@ -416,74 +443,6 @@ def validate_config(conf, sample_vmids=None, get_all_vms_func=None):
             continue
         check_rule_ports(p["entries"], f"profile[{pid}].entries")
 
-    dyn = conf.get("settings", {}).get("dynamic_tc", {})
-    dyn_rules = dyn.get("rules", [])
-    if dyn and not isinstance(dyn_rules, list):
-        errors.append("dynamic_tc.rules 必须是列表")
-    for idx, r in enumerate(dyn_rules if isinstance(dyn_rules, list) else []):
-        if not isinstance(r, dict):
-            errors.append(f"dynamic_tc.rules[{idx}] 必须是对象")
-            continue
-        if not str(r.get("name", "")).strip():
-            errors.append(f"dynamic_tc.rules[{idx}] 缺少 name")
-        for k in ["window_minutes", "throttle_minutes", "cooldown_minutes"]:
-            try:
-                v = int(r.get(k, 0))
-                if v < 0:
-                    errors.append(f"dynamic_tc.rules[{idx}].{k} 不能为负数")
-            except Exception:
-                errors.append(f"dynamic_tc.rules[{idx}].{k} 必须是整数")
-        for k in ["rx_threshold_mib", "tx_threshold_mib"]:
-            try:
-                float(r.get(k, 0))
-            except Exception:
-                errors.append(f"dynamic_tc.rules[{idx}].{k} 必须是数字")
-        for k in ["throttle_dn_mbit", "throttle_up_mbit"]:
-            val = str(r.get(k, ""))
-            if val and not re.match(r"^\d+(\.\d+)?mbit$", val):
-                errors.append(f"dynamic_tc.rules[{idx}].{k} 必须是类似 50mbit 的格式")
-
-    mon = conf.get("settings", {}).get("monitoring", {})
-    if mon and not isinstance(mon, dict):
-        errors.append("monitoring 必须是对象")
-    alerts_cfg = mon.get("alerts", {}) if isinstance(mon, dict) else {}
-    cleanup_cfg = mon.get("cleanup", {}) if isinstance(mon, dict) else {}
-    snapshot_cfg = mon.get("snapshot", {}) if isinstance(mon, dict) else {}
-
-    for k in ["node_cpu_pct", "node_mem_pct", "node_disk_pct"]:
-        if k in alerts_cfg:
-            try:
-                v = float(alerts_cfg.get(k, 0))
-                if v < 0 or v > 100:
-                    errors.append(f"monitoring.alerts.{k} 必须在 0-100")
-            except Exception:
-                errors.append(f"monitoring.alerts.{k} 必须是数字")
-
-    for k in ["vm_conn_total", "vm_conn_inbound", "vm_conn_outbound"]:
-        if k in alerts_cfg:
-            try:
-                v = int(alerts_cfg.get(k, 0))
-                if v < 0:
-                    errors.append(f"monitoring.alerts.{k} 不能为负数")
-            except Exception:
-                errors.append(f"monitoring.alerts.{k} 必须是整数")
-
-    for k in ["report_keep_days", "snapshot_keep_days"]:
-        if k in cleanup_cfg:
-            try:
-                v = int(cleanup_cfg.get(k, 0))
-                if v < 0:
-                    errors.append(f"monitoring.cleanup.{k} 不能为负数")
-            except Exception:
-                errors.append(f"monitoring.cleanup.{k} 必须是整数")
-
-    if "keep_days" in snapshot_cfg:
-        try:
-            v = int(snapshot_cfg.get("keep_days", 0))
-            if v < 0:
-                errors.append("monitoring.snapshot.keep_days 不能为负数")
-        except Exception:
-            errors.append("monitoring.snapshot.keep_days 必须是整数")
 
     for vmid, vmc in conf.get("vms", {}).items():
         if not str(vmid).isdigit():
@@ -526,7 +485,7 @@ def preview_rules(vmid, conf):
     vmc = get_vm_conf(conf, vmid)
     rows = []
     for idx, (name, ext, intp, proto) in enumerate(expand_port_rules(vmid, conf, vmc)):
-        rows.append({"idx": idx, "name": name, "proto": proto, "ext": ext, "int": intp, "ip": get_vm_ip(vmid, conf)})
+        rows.append({"idx": idx, "name": name, "proto": proto, "ext": ext, "int": intp, "ip": get_vm_ip(vmid, conf, scope="biz")})
     return rows
 
 

@@ -1,3 +1,4 @@
+import base64
 import datetime
 import fcntl
 import json
@@ -8,7 +9,7 @@ import stat
 
 from .constants import LOCK_FILE
 from .policy import vmid_access, vmid_allowed
-from .rules import expand_port_rules, get_vm_conf, get_vm_ip
+from .rules import expand_port_rules, get_vm_conf, get_vm_ip, get_vm_all_ips
 from .utils import audit, run_cmd
 
 
@@ -45,11 +46,10 @@ def handle_hook_event(vmid, phase, conf):
     phase = str(phase or "").strip().lower()
     if phase in ["post-start", "started", "start"]:
         apply_nat(vmid, "add", conf, explicit=False, batch=False)
-        apply_tc(vmid, "add", conf, explicit=False, batch=False)
+        inject_policy_routing(vmid, conf)
         return "start-sync"
     if phase in ["pre-stop", "post-stop", "stopped", "stop"]:
         apply_nat(vmid, "del", conf, explicit=False, batch=False)
-        apply_tc(vmid, "del", conf, explicit=False, batch=False)
         return "stop-clean"
     return "ignored"
 
@@ -85,11 +85,6 @@ def get_all_vms(conf, include_templates=False):
     return [v for v in items if int(v.get("template", 0)) == 0]
 
 
-def get_net_device(vmid):
-    for dev in [f"tap{vmid}i0", f"veth{vmid}i0"]:
-        if os.path.exists(f"/sys/class/net/{dev}"):
-            return dev
-    return None
 
 
 def parse_vms_str(input_str, conf, operation="general"):
@@ -133,7 +128,7 @@ def apply_nat(vmid, action, conf, explicit=True, batch=False):
         return access["reason"]
 
     vm_conf = get_vm_conf(conf, vmid_str)
-    target_ip = get_vm_ip(vmid_str, conf)
+    target_ip = get_vm_ip(vmid_str, conf, scope="biz")
     if target_ip == "None":
         return "no-ip"
 
@@ -148,12 +143,18 @@ def apply_nat(vmid, action, conf, explicit=True, batch=False):
             if action == "del":
                 return "deleted"
 
+            if vm_conf.get("skip_pve_nat") or vm_conf.get("gateway_proxy"):
+                return "bypassed"
+
             try:
                 expanded_rules = expand_port_rules(vmid_str, conf, vm_conf)
             except ValueError:
                 return "conflict-error"
 
+            use_snat = vm_conf.get("use_snat") or conf.get("settings", {}).get("behavior", {}).get("default_use_snat", False)
+
             for _name, ext_p, int_p, proto in expanded_rules:
+                # DNAT rule
                 run_cmd(
                     [
                         iptables,
@@ -175,79 +176,119 @@ def apply_nat(vmid, action, conf, explicit=True, batch=False):
                         f"{target_ip}:{int_p}",
                     ]
                 )
+                # Optional SNAT rule to handle asymmetric routing if policy routing is not used/desired
+                if use_snat:
+                    run_cmd(
+                        [
+                            iptables,
+                            "-t",
+                            "nat",
+                            "-A",
+                            "POSTROUTING",
+                            "-p",
+                            str(proto),
+                            "-d",
+                            str(target_ip),
+                            "--dport",
+                            str(int_p),
+                            "-m",
+                            "comment",
+                            "--comment",
+                            tag,
+                            "-j",
+                            "MASQUERADE",
+                        ]
+                    )
         finally:
             fcntl.flock(lockfile, fcntl.LOCK_UN)
     return "ok"
 
 
-def get_current_limit(vmid, vm_conf, conf):
-    dyn = vm_conf.get("_dyn_limit")
-    if isinstance(dyn, dict):
-        return str(dyn.get("dn", "-")), str(dyn.get("up", "-"))
+def inject_policy_routing(vmid, conf):
+    vmid_str = str(vmid)
+    vm_conf = get_vm_conf(conf, vmid_str)
 
-    now = datetime.datetime.now()
-    curr_hour, curr_day = now.hour, now.isoweekday()
-    limits = vm_conf.get("limits")
-    if limits is None:
-        limits = conf.get("global_limits", [])
-    for rule in limits:
-        days = rule.get("days", list(range(1, 8)))
-        if curr_day in days and int(rule["s"]) <= curr_hour < int(rule["e"]):
-            return rule["dn"], rule["up"]
-    return "-", "-"
+    if not vm_conf.get("policy_routing", True):
+        return "disabled"
 
+    biz_ip = get_vm_ip(vmid_str, conf, scope="biz")
+    if biz_ip == "None":
+        return "no-biz-ip"
 
-def apply_tc(vmid, action, conf, explicit=True, batch=False):
-    access = vmid_access(vmid, conf, operation="tc", explicit=explicit, batch=batch)
-    if not access["allow"]:
-        return access["reason"]
+    # PVE internal IP on the same VLAN (defaulting to .226 as per user topology)
+    pve_ip = conf.get("settings", {}).get("interfaces", {}).get("biz_pve_ip", "100.112.247.226")
 
-    cif = get_net_device(vmid)
-    if not cif:
-        return "no-dev"
+    qm = cfg_cmd(conf, "qm", "qm")
 
-    tc = cfg_cmd(conf, "tc", "tc")
+    # Use a high priority table for our custom routing
+    # We first try to delete the rule/route to avoid duplicates, then add
+    commands = [
+        f"ip rule del from {biz_ip} table 100",
+        f"ip rule add from {biz_ip} table 100",
+        f"ip route add default via {pve_ip} table 100",
+    ]
 
-    run_cmd([tc, "qdisc", "del", "dev", str(cif), "root"])
-    run_cmd([tc, "qdisc", "del", "dev", str(cif), "ingress"])
-    if action == "del":
-        return "deleted"
+    results = []
+    for cmd in commands:
+        # We don't check return code for 'del' because it might fail if not exists
+        run = run_cmd([qm, "guest", "exec", vmid_str, "--"] + shlex.split(cmd))
+        results.append(run.returncode == 0)
 
-    vm_conf = get_vm_conf(conf, str(vmid))
-    dr, ur = get_current_limit(str(vmid), vm_conf, conf)
-    if dr not in ["-", "0mbit", "unlimited"]:
-        run_cmd([tc, "qdisc", "add", "dev", str(cif), "root", "handle", "1:", "htb", "default", "10"])
-        run_cmd([tc, "class", "add", "dev", str(cif), "parent", "1:", "classid", "1:1", "htb", "rate", "10000mbit"])
-        run_cmd([tc, "class", "add", "dev", str(cif), "parent", "1:", "classid", "1:10", "htb", "rate", str(dr), "burst", "50mb"])
-    if ur not in ["-", "0mbit", "unlimited"]:
-        run_cmd([tc, "qdisc", "add", "dev", str(cif), "handle", "ffff:", "ingress"])
-        run_cmd(
-            [
-                tc,
-                "filter",
-                "add",
-                "dev",
-                str(cif),
-                "parent",
-                "ffff:",
-                "protocol",
-                "ip",
-                "prio",
-                "50",
-                "u32",
-                "match",
-                "ip",
-                "dst",
-                "0.0.0.0/0",
-                "police",
-                "rate",
-                str(ur),
-                "burst",
-                "5mb",
-                "drop",
-            ]
-        )
+    audit(f"Policy routing injected for VM {vmid_str} (IP: {biz_ip}, GW: {pve_ip})")
     return "ok"
+
+
+def audit_vm_network(vmid, conf):
+    vmid_str = str(vmid)
+    expected_ips = get_vm_all_ips(vmid_str, conf)
+    if not expected_ips:
+        return {"status": "no-config", "mismatches": []}
+
+    qm = cfg_cmd(conf, "qm", "qm")
+    # Command to get IPs in JSON format
+    res = run_cmd([qm, "guest", "exec", vmid_str, "--", "ip", "-j", "addr"])
+
+    actual_ips = []
+    if res.returncode != 0:
+        return {"status": "agent-error", "mismatches": []}
+
+    try:
+        data = json.loads(res.stdout or "{}")
+        out_raw = ""
+        if isinstance(data, dict) and "out-data" in data:
+            out_raw = base64.b64decode(data["out-data"]).decode("utf-8")
+        else:
+            out_raw = res.stdout or ""
+
+        # Parse the 'ip -j addr' output
+        ip_data = json.loads(out_raw)
+        for iface in ip_data:
+            for addr in iface.get("addr_info", []):
+                loc = addr.get("local")
+                if loc:
+                    actual_ips.append(str(loc))
+    except Exception:
+        # Fallback for older PVE versions or different output formats
+        try:
+            ip_data = json.loads(res.stdout or "[]")
+            for iface in ip_data:
+                for addr in iface.get("addr_info", []):
+                    loc = addr.get("local")
+                    if loc:
+                        actual_ips.append(str(loc))
+        except Exception:
+            return {"status": "parse-error", "mismatches": []}
+
+    mismatches = []
+    for scope, exp_ip in expected_ips.items():
+        if exp_ip not in actual_ips:
+            mismatches.append({"scope": scope, "expected": exp_ip})
+
+    return {
+        "status": "ok" if not mismatches else "mismatch",
+        "actual_ips": actual_ips,
+        "mismatches": mismatches
+    }
 
 
 def sync_all(sync_type, full_reset, conf):
@@ -272,8 +313,6 @@ def sync_all(sync_type, full_reset, conf):
         vmid = vm["vmid"]
         if sync_type in ["nat", "all"]:
             apply_nat(vmid, "add", conf, explicit=False, batch=True)
-        if sync_type in ["tc", "all"]:
-            apply_tc(vmid, "add", conf, explicit=False, batch=True)
 
 
 def power_action(vmid, act, conf):
@@ -302,580 +341,3 @@ def backup_config(config_file, output_file=""):
     return output_file
 
 
-def _load_dyn_state(conf):
-    state_file = str(conf.get("settings", {}).get("dynamic_tc", {}).get("state_file", "/var/lib/vmmgr/dyn_tc_state.json"))
-    state = {"records": {}, "updated_at": ""}
-    if os.path.exists(state_file):
-        try:
-            with open(state_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, dict):
-                state = data
-        except Exception:
-            pass
-    return state_file, state
-
-
-def _save_dyn_state(state_file, state):
-    state_dir = os.path.dirname(state_file)
-    if state_dir:
-        os.makedirs(state_dir, exist_ok=True)
-    tmp = f"{state_file}.tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(state, f, indent=2, ensure_ascii=False)
-    os.replace(tmp, state_file)
-
-
-def _recent_traffic_bytes(vn_payload, window_minutes):
-    interfaces = vn_payload.get("interfaces", [])
-    if not interfaces:
-        return 0, 0
-    traffic = interfaces[0].get("traffic", {})
-
-    def to_int(v):
-        try:
-            return int(v)
-        except Exception:
-            return 0
-
-    def sum_last(items, n):
-        if not isinstance(items, list) or not items:
-            return 0, 0
-        selected = items[-max(1, n) :]
-        rx = sum(to_int(x.get("rx", 0)) for x in selected)
-        tx = sum(to_int(x.get("tx", 0)) for x in selected)
-        return rx, tx
-
-    for k, unit in [("fiveminute", 5), ("minute", 1), ("hour", 60), ("day", 1440)]:
-        if k in traffic and isinstance(traffic.get(k), list) and traffic[k]:
-            n = (max(1, int(window_minutes)) + unit - 1) // unit
-            return sum_last(traffic[k], n)
-    return 0, 0
-
-
-def _apply_dyn_limit(vmid, dn_mbit, up_mbit, conf):
-    vm = get_vm_conf(conf, str(vmid))
-    vm["_dyn_limit"] = {"dn": str(dn_mbit), "up": str(up_mbit)}
-    apply_tc(vmid, "add", conf, explicit=False, batch=False)
-
-
-def _clear_dyn_limit(vmid, conf):
-    vm = get_vm_conf(conf, str(vmid))
-    vm.pop("_dyn_limit", None)
-    apply_tc(vmid, "add", conf, explicit=False, batch=False)
-
-
-def dynamic_tc_release(vmid, conf):
-    state_file, state = _load_dyn_state(conf)
-    key_prefix = f"{vmid}:"
-    rec = state.setdefault("records", {})
-    for k in list(rec.keys()):
-        if k.startswith(key_prefix):
-            rec.pop(k, None)
-    _save_dyn_state(state_file, state)
-    _clear_dyn_limit(vmid, conf)
-    audit(f"Dynamic TC released for VM {vmid}")
-    return True
-
-
-def dynamic_tc_check(conf):
-    cfg = conf.get("settings", {}).get("dynamic_tc", {})
-    if not bool(cfg.get("enabled", False)):
-        return []
-
-    vnstat = cfg_cmd(conf, "vnstat", "vnstat")
-    state_file, state = _load_dyn_state(conf)
-    records = state.setdefault("records", {})
-    events = []
-    now = datetime.datetime.now(datetime.timezone.utc)
-
-    vm_list = [v for v in get_all_vms(conf) if str(v.get("status")) == "running"]
-    rules = cfg.get("rules", [])
-    for vm in vm_list:
-        vmid = str(vm.get("vmid"))
-        iface = get_net_device(vmid)
-        if not iface:
-            continue
-
-        raw = run_cmd([vnstat, "--json", "-i", iface])
-        if raw.returncode != 0:
-            continue
-        try:
-            payload = json.loads(raw.stdout or "{}")
-        except Exception:
-            continue
-
-        for r in rules:
-            if not isinstance(r, dict) or not r.get("enabled", False):
-                continue
-            if not rule_match(vmid, r):
-                continue
-
-            name = str(r.get("name", "rule"))
-            rec_key = f"{vmid}:{name}"
-            rec = records.setdefault(rec_key, {})
-
-            cooldown_until = rec.get("cooldown_until", "")
-            throttled_until = rec.get("throttled_until", "")
-            dn = str(r.get("throttle_dn_mbit", "50mbit"))
-            up = str(r.get("throttle_up_mbit", "20mbit"))
-
-            def parse_dt(s):
-                if not s:
-                    return None
-                try:
-                    return datetime.datetime.fromisoformat(s)
-                except Exception:
-                    return None
-
-            cool_dt = parse_dt(cooldown_until)
-            th_dt = parse_dt(throttled_until)
-
-            if th_dt and now < th_dt:
-                _apply_dyn_limit(vmid, dn, up, conf)
-                continue
-
-            if th_dt and now >= th_dt:
-                _clear_dyn_limit(vmid, conf)
-                rec["throttled_until"] = ""
-                cd_m = int(r.get("cooldown_minutes", 30))
-                rec["cooldown_until"] = (now + datetime.timedelta(minutes=max(cd_m, 0))).isoformat()
-                events.append(f"VM {vmid} 解除动态限速: {name}")
-
-            if cool_dt and now < cool_dt:
-                continue
-
-            window = int(r.get("window_minutes", 10))
-            rx_b, tx_b = _recent_traffic_bytes(payload, window)
-            rx_mib = rx_b / (1024 * 1024)
-            tx_mib = tx_b / (1024 * 1024)
-
-            rx_limit = float(r.get("rx_threshold_mib", 2048))
-            tx_limit = float(r.get("tx_threshold_mib", 1024))
-            if rx_mib >= rx_limit or tx_mib >= tx_limit:
-                th_m = int(r.get("throttle_minutes", 30))
-                rec["last_rx_mib"] = round(rx_mib, 2)
-                rec["last_tx_mib"] = round(tx_mib, 2)
-                rec["throttled_until"] = (now + datetime.timedelta(minutes=max(th_m, 1))).isoformat()
-                rec["cooldown_until"] = ""
-                _apply_dyn_limit(vmid, dn, up, conf)
-                events.append(
-                    f"VM {vmid} 触发动态限速[{name}] rx={rx_mib:.1f}MiB tx={tx_mib:.1f}MiB -> dn={dn} up={up}"
-                )
-
-    state["updated_at"] = now.isoformat()
-    _save_dyn_state(state_file, state)
-    for e in events:
-        audit(e)
-    return events
-
-
-def dynamic_tc_status(conf, vmid=""):
-    _state_file, state = _load_dyn_state(conf)
-    records = state.get("records", {})
-    rows = []
-    for key, rec in sorted(records.items()):
-        cur_vmid, rule = key.split(":", 1)
-        if vmid and str(vmid) != cur_vmid:
-            continue
-        rows.append(
-            {
-                "vmid": cur_vmid,
-                "rule": rule,
-                "throttled_until": rec.get("throttled_until", ""),
-                "cooldown_until": rec.get("cooldown_until", ""),
-                "last_rx_mib": rec.get("last_rx_mib", 0),
-                "last_tx_mib": rec.get("last_tx_mib", 0),
-            }
-        )
-    return rows
-
-
-def vnstat_report(vmid, mode, limit, out_file, conf):
-    iface = get_net_device(vmid)
-    if not iface:
-        raise RuntimeError("no-dev")
-
-    vnstati = cfg_cmd(conf, "vnstati", "vnstati")
-    mode_map = {
-        "hour": "-h",
-        "day": "-d",
-        "month": "-m",
-        "summary": "-s",
-        "top": "-t",
-    }
-    arg = mode_map.get(str(mode).lower(), "-s")
-    lim = str(limit or 24)
-    cmd = [vnstati, arg]
-    if arg in ["-h", "-d", "-m", "-t"]:
-        cmd.append(lim)
-    cmd.extend(["-i", str(iface), "-o", str(out_file)])
-    run = run_cmd(cmd)
-    if run.returncode != 0:
-        raise RuntimeError((run.stderr or "vnstati failed").strip())
-    return out_file
-
-
-def vm_connection_stats(vmid, conf):
-    target_ip = get_vm_ip(vmid, conf)
-    if target_ip == "None":
-        raise RuntimeError("no-ip")
-
-    conntrack = cfg_cmd(conf, "conntrack", "conntrack")
-    to_vm = run_cmd([conntrack, "-L", "-d", str(target_ip)])
-    from_vm = run_cmd([conntrack, "-L", "-s", str(target_ip)])
-
-    if to_vm.returncode != 0 and from_vm.returncode != 0:
-        raise RuntimeError("conntrack-not-ready")
-
-    in_cnt = len([x for x in (to_vm.stdout or "").splitlines() if x.strip()])
-    out_cnt = len([x for x in (from_vm.stdout or "").splitlines() if x.strip()])
-    return {
-        "vmid": str(vmid),
-        "ip": target_ip,
-        "inbound": in_cnt,
-        "outbound": out_cnt,
-        "total": in_cnt + out_cnt,
-    }
-
-
-def rule_match(vmid, rule):
-    try:
-        v = int(vmid)
-    except Exception:
-        return False
-    if "vmids" in rule and isinstance(rule.get("vmids"), list):
-        return str(vmid) in [str(x) for x in rule.get("vmids", [])]
-    lo = int(rule.get("vmid_min", -10**9))
-    hi = int(rule.get("vmid_max", 10**9))
-    return lo <= v <= hi
-
-
-def node_health(conf):
-    pvesh = cfg_cmd(conf, "pvesh", "pvesh")
-    out = run_cmd([pvesh, "get", "/nodes", "--output-format", "json"])
-    if out.returncode != 0:
-        raise RuntimeError("pvesh-nodes-failed")
-
-    try:
-        nodes = json.loads(out.stdout or "[]")
-    except Exception:
-        nodes = []
-
-    node_rows = []
-    for n in nodes:
-        node = str(n.get("node", "")).strip()
-        if not node:
-            continue
-        st = run_cmd([pvesh, "get", f"/nodes/{node}/status", "--output-format", "json"])
-        if st.returncode != 0:
-            node_rows.append({"node": node, "status": "unknown"})
-            continue
-        try:
-            s = json.loads(st.stdout or "{}")
-        except Exception:
-            s = {}
-
-        mem_total = int(s.get("memory", {}).get("total", 0) or 0)
-        mem_used = int(s.get("memory", {}).get("used", 0) or 0)
-        root_total = int(s.get("rootfs", {}).get("total", 0) or 0)
-        root_used = int(s.get("rootfs", {}).get("used", 0) or 0)
-
-        node_rows.append(
-            {
-                "node": node,
-                "status": str(s.get("status", "unknown")),
-                "cpu": float(s.get("cpu", 0) or 0),
-                "mem_used": mem_used,
-                "mem_total": mem_total,
-                "root_used": root_used,
-                "root_total": root_total,
-                "uptime": int(s.get("uptime", 0) or 0),
-                "loadavg": s.get("loadavg", [0, 0, 0]),
-            }
-        )
-
-    cluster = run_cmd([pvesh, "get", "/cluster/status", "--output-format", "json"])
-    try:
-        cluster_rows = json.loads(cluster.stdout or "[]") if cluster.returncode == 0 else []
-    except Exception:
-        cluster_rows = []
-
-    return {"nodes": node_rows, "cluster": cluster_rows, "checked_at": datetime.datetime.now().isoformat()}
-
-
-def _monitor_cfg(conf):
-    settings = conf.setdefault("settings", {})
-    mon = settings.setdefault("monitoring", {})
-    mon.setdefault(
-        "alerts",
-        {
-            "enabled": False,
-            "node_cpu_pct": 90,
-            "node_mem_pct": 90,
-            "node_disk_pct": 90,
-            "vm_conn_total": 5000,
-            "vm_conn_inbound": 3000,
-            "vm_conn_outbound": 3000,
-        },
-    )
-    mon.setdefault(
-        "cleanup",
-        {
-            "enabled": False,
-            "report_dirs": ["/tmp/vnstati_batch"],
-            "report_keep_days": 7,
-            "snapshot_dirs": ["/tmp", "/var/lib/vmmgr/snapshots"],
-            "snapshot_keep_days": 7,
-        },
-    )
-    mon.setdefault(
-        "snapshot",
-        {
-            "enabled": True,
-            "dir": "/var/lib/vmmgr/snapshots",
-            "keep_days": 7,
-        },
-    )
-    mon.setdefault("api", {"schema": "pvemgr.api.v1", "source": "pvemgr"})
-    return mon
-
-
-def _to_pct(used, total):
-    used_i = float(used or 0)
-    total_i = float(total or 0)
-    if total_i <= 0:
-        return 0.0
-    return used_i * 100.0 / total_i
-
-
-def collect_monitor_overview(conf):
-    rows = []
-    dyn_rows = dynamic_tc_status(conf)
-    dyn_map = {}
-    for r in dyn_rows:
-        dyn_map.setdefault(str(r.get("vmid", "")), 0)
-        dyn_map[str(r.get("vmid", ""))] += 1
-
-    for vm in get_all_vms(conf):
-        vmid = str(vm.get("vmid"))
-        c = get_vm_conf(conf, vmid)
-        dn, up = get_current_limit(vmid, c, conf)
-        rows.append(
-            {
-                "vmid": vmid,
-                "status": str(vm.get("status", "-")),
-                "ip": get_vm_ip(vmid, conf),
-                "dyn_rules": dyn_map.get(vmid, 0),
-                "limit_dn": dn,
-                "limit_up": up,
-            }
-        )
-    return rows
-
-
-def alert_check(conf):
-    mon = _monitor_cfg(conf)
-    policy = mon.get("alerts", {})
-    if not bool(policy.get("enabled", False)):
-        return []
-
-    alerts = []
-    now = datetime.datetime.now().isoformat()
-
-    nh = node_health(conf)
-    for n in nh.get("nodes", []):
-        node = str(n.get("node", ""))
-        cpu_pct = float(n.get("cpu", 0) or 0) * 100.0
-        mem_pct = _to_pct(n.get("mem_used", 0), n.get("mem_total", 0))
-        disk_pct = _to_pct(n.get("root_used", 0), n.get("root_total", 0))
-
-        checks = [
-            ("node_cpu_pct", cpu_pct, float(policy.get("node_cpu_pct", 90))),
-            ("node_mem_pct", mem_pct, float(policy.get("node_mem_pct", 90))),
-            ("node_disk_pct", disk_pct, float(policy.get("node_disk_pct", 90))),
-        ]
-        for metric, value, threshold in checks:
-            if value >= threshold:
-                alerts.append(
-                    {
-                        "ts": now,
-                        "severity": "warning",
-                        "source": "node",
-                        "id": node,
-                        "metric": metric,
-                        "value": round(value, 2),
-                        "threshold": threshold,
-                        "message": f"Node {node} {metric}={value:.1f}% >= {threshold}%",
-                    }
-                )
-
-    for vm in get_all_vms(conf):
-        if str(vm.get("status")) != "running":
-            continue
-        vmid = str(vm.get("vmid"))
-        try:
-            cs = vm_connection_stats(vmid, conf)
-        except Exception:
-            continue
-
-        checks = [
-            ("vm_conn_total", float(cs.get("total", 0)), float(policy.get("vm_conn_total", 5000))),
-            ("vm_conn_inbound", float(cs.get("inbound", 0)), float(policy.get("vm_conn_inbound", 3000))),
-            ("vm_conn_outbound", float(cs.get("outbound", 0)), float(policy.get("vm_conn_outbound", 3000))),
-        ]
-        for metric, value, threshold in checks:
-            if value >= threshold:
-                alerts.append(
-                    {
-                        "ts": now,
-                        "severity": "warning",
-                        "source": "vm",
-                        "id": vmid,
-                        "metric": metric,
-                        "value": int(value),
-                        "threshold": int(threshold),
-                        "message": f"VM {vmid} {metric}={int(value)} >= {int(threshold)}",
-                    }
-                )
-
-    for a in alerts:
-        audit(f"ALERT {a['severity']} {a['source']}:{a['id']} {a['metric']}={a['value']} threshold={a['threshold']}")
-
-    snap_cfg = mon.get("snapshot", {})
-    if alerts and bool(snap_cfg.get("enabled", True)):
-        snap_dir = str(snap_cfg.get("dir", "/var/lib/vmmgr/snapshots"))
-        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        out = os.path.join(snap_dir, f"alert_snapshot_{ts}.json")
-        payload = export_api_payload(conf, "snapshot", alerts_override=alerts)
-        os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
-        with open(out, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
-        audit(f"ALERT_SNAPSHOT exported {out}")
-    return alerts
-
-
-def _is_older_than(path, days):
-    try:
-        mtime = datetime.datetime.fromtimestamp(os.path.getmtime(path))
-    except Exception:
-        return False
-    return mtime < (datetime.datetime.now() - datetime.timedelta(days=max(int(days), 0)))
-
-
-def cleanup_auto(conf):
-    mon = _monitor_cfg(conf)
-    c = mon.get("cleanup", {})
-    if not bool(c.get("enabled", False)):
-        return []
-
-    deleted = []
-    report_keep = int(c.get("report_keep_days", 7))
-    snap_keep = int(c.get("snapshot_keep_days", 7))
-
-    for d in c.get("report_dirs", ["/tmp/vnstati_batch"]):
-        if not os.path.isdir(d):
-            continue
-        for name in os.listdir(d):
-            p = os.path.join(d, name)
-            if not os.path.isfile(p):
-                continue
-            if not name.lower().endswith(".png"):
-                continue
-            if _is_older_than(p, report_keep):
-                try:
-                    os.remove(p)
-                    deleted.append(p)
-                except Exception:
-                    pass
-
-    snap_dirs = list(c.get("snapshot_dirs", ["/tmp", "/var/lib/vmmgr/snapshots"]))
-    snap_cfg_dir = str(mon.get("snapshot", {}).get("dir", ""))
-    if snap_cfg_dir and snap_cfg_dir not in snap_dirs:
-        snap_dirs.append(snap_cfg_dir)
-
-    for d in snap_dirs:
-        if not os.path.isdir(d):
-            continue
-        for name in os.listdir(d):
-            p = os.path.join(d, name)
-            if not os.path.isfile(p):
-                continue
-            if not name.lower().endswith(".json"):
-                continue
-            if not (name.startswith("vmmgr_snapshot_") or name.startswith("monitor_snapshot_")):
-                continue
-            if _is_older_than(p, snap_keep):
-                try:
-                    os.remove(p)
-                    deleted.append(p)
-                except Exception:
-                    pass
-
-    if deleted:
-        audit(f"CLEANUP removed {len(deleted)} files")
-    return deleted
-
-
-def export_api_payload(conf, payload_type, vmid="", input_expr="", alerts_override=None):
-    mon = _monitor_cfg(conf)
-    api_meta = mon.get("api", {})
-    schema = str(api_meta.get("schema", "pvemgr.api.v1"))
-    source = str(api_meta.get("source", "pvemgr"))
-
-    ptype = str(payload_type or "overview").lower()
-    data = {}
-    alerts = []
-
-    if ptype == "overview":
-        data = {"overview": collect_monitor_overview(conf), "dynamic": dynamic_tc_status(conf)}
-    elif ptype == "node":
-        data = node_health(conf)
-    elif ptype == "alerts":
-        alerts = alert_check(conf)
-        data = {"count": len(alerts)}
-    elif ptype == "conn":
-        if vmid:
-            data = vm_connection_stats(vmid, conf)
-        else:
-            rows = []
-            for vid in parse_vms_str(input_expr or "all", conf, operation="general").split():
-                try:
-                    rows.append(vm_connection_stats(vid, conf))
-                except Exception as ex:
-                    rows.append({"vmid": str(vid), "error": str(ex)})
-            data = {"rows": rows}
-    elif ptype == "snapshot":
-        data = {
-            "overview": collect_monitor_overview(conf),
-            "dynamic": dynamic_tc_status(conf),
-            "node_health": node_health(conf),
-        }
-        alerts = list(alerts_override) if alerts_override is not None else alert_check(conf)
-    else:
-        data = {"message": f"unknown payload_type: {ptype}"}
-
-    return {
-        "schema": schema,
-        "type": ptype,
-        "source": source,
-        "generated_at": datetime.datetime.now().isoformat(),
-        "data": data,
-        "alerts": alerts,
-    }
-
-
-def monitor_snapshot(conf, out_file=""):
-    mon = _monitor_cfg(conf)
-    snap_cfg = mon.get("snapshot", {})
-    snap_dir = str(snap_cfg.get("dir", "/var/lib/vmmgr/snapshots"))
-    if not out_file:
-        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        out_file = os.path.join(snap_dir, f"monitor_snapshot_{ts}.json")
-
-    payload = export_api_payload(conf, "snapshot")
-    os.makedirs(os.path.dirname(out_file) or ".", exist_ok=True)
-    with open(out_file, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
-    audit(f"SNAPSHOT exported {out_file}")
-    return out_file

@@ -154,13 +154,6 @@ install_files() {
     rm -f "$INSTALL_DIR/README.md" "$INSTALL_DIR/vmnat_config.example.json" "$INSTALL_DIR/vmnat_utils.py"
 }
 
-ensure_cron() {
-    [[ "${AUTO_CRON_SYNC_TC:-1}" != "1" ]] && return 0
-    local cron_line="* * * * * $INSTALL_DIR/vmmgrctl.py --config $CONFIG_PATH sync_all --type tc >/dev/null 2>&1; $INSTALL_DIR/vmmgrctl.py --config $CONFIG_PATH dyn_tc_check >/dev/null 2>&1; $INSTALL_DIR/vmmgrctl.py --config $CONFIG_PATH alert_check --json >/dev/null 2>&1; $INSTALL_DIR/vmmgrctl.py --config $CONFIG_PATH cleanup_auto --json >/dev/null 2>&1"
-    if ! crontab -l 2>/dev/null | grep -Fq "$cron_line"; then
-        (crontab -l 2>/dev/null; echo "$cron_line") | crontab -
-    fi
-}
 
 write_meta() {
     local final_tag="${FORCE_TAG:-$PREV_RELEASE_TAG}"
@@ -171,7 +164,6 @@ INSTALL_DIR="$INSTALL_DIR"
 UTILS_PATH="$INSTALL_DIR/vmmgrctl.py"
 VMMGR_PATH="$INSTALL_DIR/vmmgr"
 CONFIG_PATH="$CONFIG_PATH"
-AUTO_CRON_SYNC_TC="${AUTO_CRON_SYNC_TC:-1}"
 REPO_OWNER="$REPO_OWNER"
 REPO_NAME="$REPO_NAME"
 INSTALL_SOURCE="$SOURCE_MODE"
@@ -268,7 +260,6 @@ if [[ "$SKIP_UPDATE" == "1" ]]; then
 fi
 install_files
 write_meta
-ensure_cron
 
 echo "更新完成"
 echo "  已更新: $INSTALL_DIR/vmmgr"

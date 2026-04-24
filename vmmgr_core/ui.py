@@ -5,36 +5,12 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from .rules import expand_port_rules, get_profile_status_for_vm, get_vm_conf, get_vm_ip
+from .rules import expand_port_rules, get_profile_status_for_vm, get_vm_conf, get_vm_ip, get_vm_all_ips
 from .utils import get_term_width
 
 console = Console()
 
 
-def format_bw(bw, direction=""):
-    if not bw or bw in ["-", "unlimited"]:
-        return f"{direction} 无".strip()
-    v = str(bw).replace("mbit", "")
-    if v == "0":
-        return "无"
-    try:
-        vi = int(v)
-        val = f"{vi // 1000}G" if vi >= 1000 and vi % 1000 == 0 else f"{vi}m"
-    except Exception:
-        val = bw
-    return f"{direction} {val}".strip()
-
-
-def format_limits(limits):
-    if not limits:
-        return "[dim]未设置[/]"
-    res = []
-    d_m = {1: "一", 2: "二", 3: "三", 4: "四", 5: "五", 6: "六", 7: "日"}
-    for i, r in enumerate(limits):
-        days = r.get("days", list(range(1, 8)))
-        d_s = "全周" if len(days) == 7 else "周" + ",".join([d_m[d] for d in days])
-        res.append(f"\\[{i}] {d_s} {r['s']}-{r['e']}点: ↓{format_bw(r['dn'])} ↑{format_bw(r['up'])}")
-    return "\n".join(res)
 
 
 def get_os_nickname(vm_name, conf_nick):
@@ -80,7 +56,7 @@ def render_submenu(title, columns, extractor, opts, conf, all_vms):
         console.print(Panel(Columns([Panel(i, box=box.SIMPLE, expand=True) for i in opts], equal=True), border_style="cyan"))
 
 
-def render_main_menu(conf, all_vms, current_limit_func, show_panel=True):
+def render_main_menu(conf, all_vms, show_panel=True):
     compact = get_term_width() < 100
     table = Table(
         title="[bold white]虚拟机实时状态汇总[/bold white]",
@@ -91,10 +67,10 @@ def render_main_menu(conf, all_vms, current_limit_func, show_panel=True):
     )
 
     if compact:
-        for h in ["ID", "实例", "IP/端口", "流控(↓/↑)", "状态"]:
+        for h in ["ID", "实例", "IP/端口 (B/M)", "状态"]:
             table.add_column(h, justify="center")
     else:
-        for h in ["ID", "系统 / 昵称", "IP (规则数)", "类型 (Hook)", "额外转发", "当前实时流控", "状态"]:
+        for h in ["ID", "系统 / 昵称", "IP (B/M)", "类型 (Hook)", "额外转发 (端口数)", "状态"]:
             table.add_column(h, justify="center")
 
     for vm in sorted(all_vms, key=lambda x: x["vmid"]):
@@ -104,24 +80,39 @@ def render_main_menu(conf, all_vms, current_limit_func, show_panel=True):
 
         rules_cnt = len(expand_port_rules(vmid, conf, vm_c))
         extra_pf = get_profile_status_for_vm(vmid, vm_c, conf)
-        dn, up = current_limit_func(vmid, vm_c, conf)
 
+        # Multi-IP Support
+        biz_ip = get_vm_ip(vmid, conf, scope="biz")
+        mgmt_ip = get_vm_ip(vmid, conf, scope="mgmt")
+
+        # Optional Audit Info
+        audit_res = vm.get("_audit")
+        biz_display = biz_ip
+        mgmt_display = mgmt_ip
+
+        if audit_res and audit_res["status"] == "mismatch":
+            actuals = audit_res.get("actual_ips", [])
+            for mis in audit_res.get("mismatches", []):
+                if mis["scope"] == "biz":
+                    biz_display = f"[bold red]{biz_ip}[/]\n[dim]Actual: {','.join(actuals) or 'None'}[/]"
+                if mis["scope"] == "mgmt":
+                    mgmt_display = f"[bold red]{mgmt_ip}[/]\n[dim]Actual: {','.join(actuals) or 'None'}[/]"
+        elif audit_res and audit_res["status"] == "agent-error":
+            biz_display = f"{biz_ip} [dim](Agent?)[/]"
         if compact:
             table.add_row(
                 vmid,
                 f"{os_n}\n[dim]{nick}[/dim]",
-                f"{get_vm_ip(vmid, conf)}\n[dim]({rules_cnt})[/dim]",
-                f"{format_bw(dn,'↓')}\n{format_bw(up,'↑')}",
+                f"B:{biz_display}\nM:{mgmt_display}",
                 "[bold green]Yes[/]" if vm.get("status") == "running" else "[dim]No[/]",
             )
         else:
             table.add_row(
                 vmid,
                 f"{os_n}\n[dim]{nick}[/dim]",
-                f"{get_vm_ip(vmid, conf)}\n[dim]({rules_cnt})[/dim]",
+                f"[bold cyan]B:[/] {biz_display}\n[bold magenta]M:[/] {mgmt_display}",
                 f"{vm.get('type', '-').upper()}\n[dim]({'Hook' if has_hook(vmid) else 'No'})[/dim]",
-                extra_pf,
-                f"{format_bw(dn,'↓')}\n{format_bw(up,'↑')}",
+                f"{extra_pf}\n[dim]Ports: {rules_cnt}[/dim]",
                 "[bold green]Yes[/]" if vm.get("status") == "running" else "[dim]No[/]",
             )
 
@@ -132,14 +123,14 @@ def render_main_menu(conf, all_vms, current_limit_func, show_panel=True):
             "[bold cyan]2.[/] Hook 管理",
             "[bold cyan]3.[/] 额外转发",
             "[bold cyan]4.[/] 端口转发",
-            "[bold cyan]5.[/] 动态限速",
-            "[bold cyan]6.[/] 昵称设置",
-            "[bold cyan]7.[/] 电源控制",
-            "[bold green]8.[/] 规则刷新",
-            "[bold yellow]9.[/] 网络重置",
-            "[bold magenta]10.[/] 配置校验",
-            "[bold magenta]11.[/] 规则预览",
-            "[bold blue]12.[/] 监控中心",
+            "[bold cyan]5.[/] 昵称设置",
+            "[bold cyan]6.[/] 电源控制",
+            "[bold green]7.[/] 规则刷新",
+            "[bold yellow]8.[/] 网络重置",
+            "[bold magenta]9.[/] 配置校验",
+            "[bold magenta]10.[/] 规则预览",
+            "[bold white]11.[/] 配置备份",
+            "[bold white]12.[/] 系统信息",
             "[bold red]0.[/] 退出系统",
         ]
         if compact:

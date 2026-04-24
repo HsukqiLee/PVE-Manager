@@ -14,73 +14,23 @@ def default_config():
                 "pvesh": "pvesh",
                 "iptables": "iptables",
                 "iptables_save": "iptables-save",
-                "tc": "tc",
                 "qm": "qm",
                 "pct": "pct",
-                "vnstat": "vnstat",
-                "vnstati": "vnstati",
-                "conntrack": "conntrack",
             },
             "behavior": {
                 "linux_ssh_port": "22",
                 "windows_rdp_port": "3389",
                 "postrouting_cidr": "10.10.0.0/16",
             },
-            "dynamic_tc": {
-                "enabled": False,
-                "state_file": "/var/lib/vmmgr/dyn_tc_state.json",
-                "rules": [
-                    {
-                        "name": "default-burst-control",
-                        "enabled": False,
-                        "vmid_min": 100,
-                        "vmid_max": 199,
-                        "window_minutes": 10,
-                        "rx_threshold_mib": 2048,
-                        "tx_threshold_mib": 1024,
-                        "throttle_minutes": 30,
-                        "cooldown_minutes": 30,
-                        "throttle_dn_mbit": "50mbit",
-                        "throttle_up_mbit": "20mbit",
-                    }
-                ],
-            },
-            "monitoring": {
-                "alerts": {
-                    "enabled": False,
-                    "node_cpu_pct": 90,
-                    "node_mem_pct": 90,
-                    "node_disk_pct": 90,
-                    "vm_conn_total": 5000,
-                    "vm_conn_inbound": 3000,
-                    "vm_conn_outbound": 3000,
-                },
-                "cleanup": {
-                    "enabled": False,
-                    "report_dirs": ["/tmp/vnstati_batch"],
-                    "report_keep_days": 7,
-                    "snapshot_dirs": ["/tmp", "/var/lib/vmmgr/snapshots"],
-                    "snapshot_keep_days": 7,
-                },
-                "snapshot": {
-                    "enabled": True,
-                    "dir": "/var/lib/vmmgr/snapshots",
-                    "keep_days": 7,
-                },
-                "api": {
-                    "schema": "pvemgr.api.v1",
-                    "source": "pvemgr",
-                },
-            },
             "operation_policy": {
                 "scope_allowed_ops": {
-                    "vm": ["general", "hook", "nat", "tc", "power", "limit", "nickname", "xpf", "preview"],
+                    "vm": ["general", "hook", "nat", "power", "nickname", "xpf", "preview"],
                     "template": ["hook"],
                     "outside": []
                 },
                 "action_allowed_ops": {
-                    "allow": ["general", "hook", "nat", "tc", "power", "limit", "nickname", "xpf", "preview"],
-                    "ignore_explicit": ["general", "hook", "nat", "tc", "power", "limit", "nickname", "xpf", "preview"],
+                    "allow": ["general", "hook", "nat", "power", "nickname", "xpf", "preview"],
+                    "ignore_explicit": ["general", "hook", "nat", "power", "nickname", "xpf", "preview"],
                     "ignore_batch": []
                 },
                 "outside_ignore_explicit": True
@@ -150,7 +100,6 @@ def default_config():
                 }
             ],
         },
-        "global_limits": [],
         "vms": {},
     }
 
@@ -178,8 +127,6 @@ def migrate_legacy_config(raw):
         if str(k).isdigit() and isinstance(v, dict):
             cfg.setdefault("vms", {})[str(k)] = v
 
-    if "global_limits" in raw and isinstance(raw["global_limits"], list):
-        cfg["global_limits"] = raw["global_limits"]
 
     if "settings" in raw and isinstance(raw["settings"], dict):
         cfg["settings"] = deep_merge(cfg["settings"], raw["settings"])

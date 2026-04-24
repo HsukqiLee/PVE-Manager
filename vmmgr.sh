@@ -12,7 +12,6 @@ fi
 
 UTILS="${VMMGR_UTILS:-${UTILS_PATH:-/usr/local/bin/vmmgrctl.py}}"
 CONFIG_FILE="${VMMGR_CONFIG_FILE:-${CONFIG_PATH:-/etc/pve/vmnat_config.json}}"
-AUTO_CRON="${AUTO_CRON_SYNC_TC:-1}"
 
 if [[ ! -x "$UTILS" ]]; then
     echo "错误: 找不到可执行工具脚本: $UTILS"
@@ -24,13 +23,6 @@ util() {
     "$UTILS" --config "$CONFIG_FILE" "$@"
 }
 
-ensure_cron() {
-    [[ "$AUTO_CRON" != "1" ]] && return 0
-    local cron_line="* * * * * $UTILS --config $CONFIG_FILE sync_all --type tc >/dev/null 2>&1; $UTILS --config $CONFIG_FILE dyn_tc_check >/dev/null 2>&1; $UTILS --config $CONFIG_FILE alert_check --json >/dev/null 2>&1; $UTILS --config $CONFIG_FILE cleanup_auto --json >/dev/null 2>&1"
-    if ! crontab -l 2>/dev/null | grep -Fq "$cron_line"; then
-        (crontab -l 2>/dev/null; echo "$cron_line") | crontab -
-    fi
-}
 
 get_term_size() {
     echo "$(tput lines)x$(tput cols)"
@@ -109,7 +101,6 @@ get_targets() {
     return 0
 }
 
-ensure_cron
 
 while true; do
     RENDER_VIEW="menu"
@@ -230,98 +221,6 @@ while true; do
                 fi
             done
             ;;
-        5)
-            while true; do
-                RENDER_VIEW="speed"
-                smart_read "请选择限速配置操作: " s_choice
-                [[ "$s_choice" == "0" ]] && break
-                case "$s_choice" in
-                    1|2)
-                        if [[ "$s_choice" == "2" ]]; then
-                            read -r -p "目标 VMID: " input
-                            get_targets "$input" "tc" || continue
-                        fi
-                        read -r -p "生效星期 (1-7, 如1-5, 直接回车全周): " days
-                        read -r -p "起始小时 (0-23, 直接回车全天): " ts
-                        read -r -p "结束小时 (1-24, 直接回车全天): " te
-                        read -r -p "下行速率 (Mbps, 0为无限制): " dr
-                        read -r -p "上行速率 (Mbps, 0为无限制): " ur
-                        [[ -z "$days" ]] && days="all"
-                        [[ -z "$ts" ]] && ts="0"
-                        [[ -z "$te" ]] && te="24"
-                        if [[ "$s_choice" == "1" ]]; then
-                            util manage_limit --type global --days "$days" --ts "$ts" --te "$te" --dr "$dr" --ur "$ur"
-                        else
-                            for v in $TARGETS; do
-                                util manage_limit --type vm --vmid "$v" --days "$days" --ts "$ts" --te "$te" --dr "$dr" --ur "$ur"
-                            done
-                        fi
-                        util sync_all --type tc
-                        pause
-                        ;;
-                    3)
-                        read -r -p "目标 VMID: " input
-                        get_targets "$input" "tc" || continue
-                        read -r -p "编号 (回车全清): " idx
-                        for v in $TARGETS; do
-                            util clear_limit --type vm --vmid "$v" --idx "$idx"
-                        done
-                        util sync_all --type tc
-                        sleep 1
-                        ;;
-                    4)
-                        read -r -p "全局规则编号 (回车全清): " idx
-                        util clear_limit --type global --idx "$idx"
-                        util sync_all --type tc
-                        sleep 1
-                        ;;
-                    5)
-                        echo "执行动态限速检查..."
-                        util dyn_tc_check
-                        echo "当前动态限速状态:"
-                        util dyn_tc_status
-                        pause
-                        ;;
-                    6)
-                        read -r -p "目标 VMID: " input
-                        get_targets "$input" "tc" || continue
-                        for v in $TARGETS; do
-                            util dyn_tc_release --vmid "$v"
-                        done
-                        util sync_all --type tc
-                        pause
-                        ;;
-                    7)
-                        read -r -p "目标 VMID: " input
-                        get_targets "$input" "general" || continue
-                        if [[ $(wc -w <<< "$TARGETS") -gt 1 ]]; then
-                            echo "错误: 报表仅支持单台"
-                            sleep 1
-                            continue
-                        fi
-                        read -r -p "报表类型(summary/hour/day/month/top, 默认 summary): " mode
-                        [[ -z "$mode" ]] && mode="summary"
-                        read -r -p "条数(默认 24): " lim
-                        [[ -z "$lim" ]] && lim="24"
-                        out="/tmp/vnstati_${TARGETS}_${mode}_$(date +%Y%m%d_%H%M%S).png"
-                        util vnstat_report --vmid "$TARGETS" --mode "$mode" --limit "$lim" --out "$out"
-                        echo "报表已生成: $out"
-                        pause
-                        ;;
-                    8)
-                        read -r -p "目标 VMID: " input
-                        get_targets "$input" "general" || continue
-                        if [[ $(wc -w <<< "$TARGETS") -gt 1 ]]; then
-                            echo "错误: 连接统计仅支持单台"
-                            sleep 1
-                            continue
-                        fi
-                        util conn_stats --vmid "$TARGETS"
-                        pause
-                        ;;
-                esac
-            done
-            ;;
         6)
             while true; do
                 RENDER_VIEW="nickname"
@@ -381,166 +280,6 @@ while true; do
             read -r -p "预览 VMID: " v
             util preview_rules --vmid "$v"
             pause
-            ;;
-        12)
-            while true; do
-                RENDER_VIEW="monitor"
-                smart_read "监控中心操作: " m_choice
-                [[ "$m_choice" == "0" ]] && break
-                case "$m_choice" in
-                    1)
-                        util dyn_rule_list
-                        pause
-                        ;;
-                    2)
-                        read -r -p "规则名: " r_name
-                        read -r -p "VMID起: " r_min
-                        read -r -p "VMID止: " r_max
-                        read -r -p "窗口分钟: " r_win
-                        read -r -p "RX阈值MiB: " r_rx
-                        read -r -p "TX阈值MiB: " r_tx
-                        read -r -p "限速分钟: " r_th
-                        read -r -p "冷却分钟: " r_cd
-                        read -r -p "限速下行(如80mbit): " r_dn
-                        read -r -p "限速上行(如30mbit): " r_up
-                        util dyn_rule_add --name "$r_name" --vmid-min "$r_min" --vmid-max "$r_max" --window "$r_win" --rx "$r_rx" --tx "$r_tx" --throttle "$r_th" --cooldown "$r_cd" --dn "$r_dn" --up "$r_up" --enabled 1
-                        pause
-                        ;;
-                    3)
-                        util dyn_rule_list
-                        read -r -p "要修改的编号: " idx
-                        read -r -p "新规则名(回车跳过): " r_name
-                        read -r -p "新VMID起(回车跳过): " r_min
-                        read -r -p "新VMID止(回车跳过): " r_max
-                        read -r -p "新窗口分钟(回车跳过): " r_win
-                        read -r -p "新RX阈值MiB(回车跳过): " r_rx
-                        read -r -p "新TX阈值MiB(回车跳过): " r_tx
-                        read -r -p "新限速分钟(回车跳过): " r_th
-                        read -r -p "新冷却分钟(回车跳过): " r_cd
-                        read -r -p "新下行(回车跳过): " r_dn
-                        read -r -p "新上行(回车跳过): " r_up
-                        util dyn_rule_edit --idx "$idx" --name "$r_name" --vmid-min "$r_min" --vmid-max "$r_max" --window "$r_win" --rx "$r_rx" --tx "$r_tx" --throttle "$r_th" --cooldown "$r_cd" --dn "$r_dn" --up "$r_up"
-                        pause
-                        ;;
-                    4)
-                        util dyn_rule_list
-                        read -r -p "要删除的编号: " idx
-                        util dyn_rule_del --idx "$idx"
-                        pause
-                        ;;
-                    5)
-                        util dyn_rule_list
-                        read -r -p "规则编号: " idx
-                        read -r -p "启用=1/禁用=0: " en
-                        util dyn_rule_toggle --idx "$idx" --enabled "$en"
-                        pause
-                        ;;
-                    6)
-                        read -r -p "引擎启用=1/禁用=0: " en
-                        util dyn_engine --enabled "$en"
-                        pause
-                        ;;
-                    7)
-                        read -r -p "预设类型(home/idc/night): " preset
-                        read -r -p "VMID起: " r_min
-                        read -r -p "VMID止: " r_max
-                        read -r -p "启用(1/0, 默认1): " en
-                        [[ -z "$en" ]] && en="1"
-                        util dyn_rule_preset --preset "$preset" --vmid-min "$r_min" --vmid-max "$r_max" --enabled "$en"
-                        pause
-                        ;;
-                    8)
-                        util dyn_tc_check
-                        pause
-                        ;;
-                    9)
-                        util dyn_tc_status
-                        pause
-                        ;;
-                    10)
-                        read -r -p "目标 VMID: " input
-                        get_targets "$input" "general" || continue
-                        if [[ $(wc -w <<< "$TARGETS") -gt 1 ]]; then
-                            echo "错误: 报表仅支持单台"
-                            sleep 1
-                            continue
-                        fi
-                        read -r -p "报表类型(summary/hour/day/month/top, 默认 summary): " mode
-                        [[ -z "$mode" ]] && mode="summary"
-                        read -r -p "条数(默认 24): " lim
-                        [[ -z "$lim" ]] && lim="24"
-                        out="/tmp/vnstati_${TARGETS}_${mode}_$(date +%Y%m%d_%H%M%S).png"
-                        util vnstat_report --vmid "$TARGETS" --mode "$mode" --limit "$lim" --out "$out"
-                        echo "报表已生成: $out"
-                        pause
-                        ;;
-                    11)
-                        read -r -p "目标 VMID: " input
-                        get_targets "$input" "general" || continue
-                        if [[ $(wc -w <<< "$TARGETS") -gt 1 ]]; then
-                            echo "错误: 连接统计仅支持单台"
-                            sleep 1
-                            continue
-                        fi
-                        util conn_stats --vmid "$TARGETS"
-                        pause
-                        ;;
-                    12)
-                        read -r -p "目标集合(如 all,101,105-110): " input
-                        read -r -p "报表类型(summary/hour/day/month/top, 默认 summary): " mode
-                        [[ -z "$mode" ]] && mode="summary"
-                        read -r -p "条数(默认 24): " lim
-                        [[ -z "$lim" ]] && lim="24"
-                        read -r -p "输出目录(默认 /tmp/vnstati_batch): " out_dir
-                        [[ -z "$out_dir" ]] && out_dir="/tmp/vnstati_batch"
-                        util batch_vnstat_report --input "$input" --mode "$mode" --limit "$lim" --out-dir "$out_dir"
-                        pause
-                        ;;
-                    13)
-                        read -r -p "目标集合(如 all,101,105-110): " input
-                        util batch_conn_stats --input "$input"
-                        pause
-                        ;;
-                    14)
-                        util node_health
-                        pause
-                        ;;
-                    15)
-                        out="/tmp/vmmgr_snapshot_$(date +%Y%m%d_%H%M%S).json"
-                        util monitor_snapshot --out "$out"
-                        echo "快照已导出: $out"
-                        pause
-                        ;;
-                    16)
-                        util monitor_overview
-                        pause
-                        ;;
-                    17)
-                        util alert_check
-                        pause
-                        ;;
-                    18)
-                        util cleanup_auto
-                        pause
-                        ;;
-                    19)
-                        read -r -p "导出类型(overview/node/alerts/conn/snapshot): " t
-                        [[ -z "$t" ]] && t="overview"
-                        vmid=""
-                        input_expr=""
-                        if [[ "$t" == "conn" ]]; then
-                            read -r -p "单台VMID(可空): " vmid
-                            if [[ -z "$vmid" ]]; then
-                                read -r -p "批量输入(如 all,101,105-110): " input_expr
-                            fi
-                        fi
-                        out="/tmp/vmmgr_api_${t}_$(date +%Y%m%d_%H%M%S).json"
-                        util api_export --type "$t" --vmid "$vmid" --input "$input_expr" --out "$out"
-                        echo "API 数据已导出: $out"
-                        pause
-                        ;;
-                esac
-            done
             ;;
         0)
             clear

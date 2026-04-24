@@ -5,7 +5,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_DIR="/usr/local/bin"
 CONFIG_PATH="/etc/pve/vmnat_config.json"
 INSTALL_META="/etc/pve/vmmgr_install.conf"
-ENABLE_CRON="1"
 
 REPO_OWNER="HsukqiLee"
 REPO_NAME="PVE-Manager"
@@ -27,7 +26,6 @@ usage() {
   --install-dir PATH      安装目录 (默认: /usr/local/bin)
   --config PATH           配置文件路径 (默认: /etc/pve/vmnat_config.json)
   --meta PATH             安装元数据路径 (默认: /etc/pve/vmmgr_install.conf)
-  --disable-cron          关闭自动添加 tc 同步 cron
     --local                 从本地源码安装
   --from-release          从 release 压缩包安装
     --dry-run               仅显示将执行的动作，不做任何写入
@@ -180,42 +178,6 @@ ensure_rich_dep() {
     return 0
 }
 
-ensure_vn_tools() {
-    local missing=0
-    command -v vnstat >/dev/null 2>&1 || missing=1
-    command -v vnstati >/dev/null 2>&1 || missing=1
-    [[ "$missing" == "0" ]] && return 0
-
-    echo "检测到缺少 vnstat/vnstati，尝试自动安装..."
-    if command -v apt-get >/dev/null 2>&1; then
-        DEBIAN_FRONTEND=noninteractive apt-get update -y >/dev/null 2>&1 || true
-        DEBIAN_FRONTEND=noninteractive apt-get install -y vnstat >/dev/null 2>&1 || true
-    fi
-
-    if command -v vnstat >/dev/null 2>&1 && command -v vnstati >/dev/null 2>&1; then
-        echo "已安装 vnstat/vnstati"
-        return 0
-    fi
-
-    echo "警告: vnstat/vnstati 未就绪，动态限速与图表功能不可用"
-    echo "建议手动安装: apt-get install -y vnstat"
-    return 0
-}
-
-ensure_conntrack_tool() {
-    if command -v conntrack >/dev/null 2>&1; then
-        return 0
-    fi
-
-    if command -v apt-get >/dev/null 2>&1; then
-        DEBIAN_FRONTEND=noninteractive apt-get install -y conntrack >/dev/null 2>&1 || true
-    fi
-
-    if ! command -v conntrack >/dev/null 2>&1; then
-        echo "警告: 未找到 conntrack，连接数统计功能不可用"
-    fi
-    return 0
-}
 
 write_default_config() {
     [[ -f "$CONFIG_PATH" ]] && return 0
@@ -233,73 +195,23 @@ write_default_config() {
             "pvesh": "pvesh",
             "iptables": "iptables",
             "iptables_save": "iptables-save",
-            "tc": "tc",
             "qm": "qm",
-            "pct": "pct",
-            "vnstat": "vnstat",
-            "vnstati": "vnstati",
-            "conntrack": "conntrack"
+            "pct": "pct"
         },
         "behavior": {
             "linux_ssh_port": "22",
             "windows_rdp_port": "3389",
             "postrouting_cidr": "10.10.0.0/16"
         },
-        "dynamic_tc": {
-            "enabled": false,
-            "state_file": "/var/lib/vmmgr/dyn_tc_state.json",
-            "rules": [
-                {
-                    "name": "default-burst-control",
-                    "enabled": false,
-                    "vmid_min": 100,
-                    "vmid_max": 199,
-                    "window_minutes": 10,
-                    "rx_threshold_mib": 2048,
-                    "tx_threshold_mib": 1024,
-                    "throttle_minutes": 30,
-                    "cooldown_minutes": 30,
-                    "throttle_dn_mbit": "50mbit",
-                    "throttle_up_mbit": "20mbit"
-                }
-            ]
-        },
-        "monitoring": {
-            "alerts": {
-                "enabled": false,
-                "node_cpu_pct": 90,
-                "node_mem_pct": 90,
-                "node_disk_pct": 90,
-                "vm_conn_total": 5000,
-                "vm_conn_inbound": 3000,
-                "vm_conn_outbound": 3000
-            },
-            "cleanup": {
-                "enabled": false,
-                "report_dirs": ["/tmp/vnstati_batch"],
-                "report_keep_days": 7,
-                "snapshot_dirs": ["/tmp", "/var/lib/vmmgr/snapshots"],
-                "snapshot_keep_days": 7
-            },
-            "snapshot": {
-                "enabled": true,
-                "dir": "/var/lib/vmmgr/snapshots",
-                "keep_days": 7
-            },
-            "api": {
-                "schema": "pvemgr.api.v1",
-                "source": "pvemgr"
-            }
-        },
         "operation_policy": {
             "scope_allowed_ops": {
-                "vm": ["general", "hook", "nat", "tc", "power", "limit", "nickname", "xpf", "preview"],
+                "vm": ["general", "hook", "nat", "power", "nickname", "xpf", "preview"],
                 "template": ["hook"],
                 "outside": []
             },
             "action_allowed_ops": {
-                "allow": ["general", "hook", "nat", "tc", "power", "limit", "nickname", "xpf", "preview"],
-                "ignore_explicit": ["general", "hook", "nat", "tc", "power", "limit", "nickname", "xpf", "preview"],
+                "allow": ["general", "hook", "nat", "power", "nickname", "xpf", "preview"],
+                "ignore_explicit": ["general", "hook", "nat", "power", "nickname", "xpf", "preview"],
                 "ignore_batch": []
             },
             "outside_ignore_explicit": true
@@ -385,7 +297,6 @@ write_default_config() {
             }
         ]
     },
-    "global_limits": [],
     "vms": {}
 }
 JSON
@@ -398,7 +309,6 @@ INSTALL_DIR="$INSTALL_DIR"
 UTILS_PATH="$INSTALL_DIR/vmmgrctl.py"
 VMMGR_PATH="$INSTALL_DIR/vmmgr"
 CONFIG_PATH="$CONFIG_PATH"
-AUTO_CRON_SYNC_TC="$ENABLE_CRON"
 REPO_OWNER="$REPO_OWNER"
 REPO_NAME="$REPO_NAME"
 INSTALL_SOURCE="$SOURCE_MODE"
@@ -406,13 +316,6 @@ RELEASE_TAG="${FORCE_TAG:-auto}"
 EOF
 }
 
-ensure_cron() {
-    [[ "$ENABLE_CRON" != "1" ]] && return 0
-    local cron_line="* * * * * $INSTALL_DIR/vmmgrctl.py --config $CONFIG_PATH sync_all --type tc >/dev/null 2>&1; $INSTALL_DIR/vmmgrctl.py --config $CONFIG_PATH dyn_tc_check >/dev/null 2>&1; $INSTALL_DIR/vmmgrctl.py --config $CONFIG_PATH alert_check --json >/dev/null 2>&1; $INSTALL_DIR/vmmgrctl.py --config $CONFIG_PATH cleanup_auto --json >/dev/null 2>&1"
-    if ! crontab -l 2>/dev/null | grep -Fq "$cron_line"; then
-        (crontab -l 2>/dev/null; echo "$cron_line") | crontab -
-    fi
-}
 
 init_hook_script() {
     local hook_path=""
@@ -447,10 +350,6 @@ while [[ $# -gt 0 ]]; do
         --meta)
             INSTALL_META="$2"
             shift 2
-            ;;
-        --disable-cron)
-            ENABLE_CRON="0"
-            shift
             ;;
         --local)
             SOURCE_MODE="local"
@@ -500,7 +399,6 @@ if [[ "$DRY_RUN" == "1" ]]; then
     echo "  install_dir: $INSTALL_DIR"
     echo "  config_path: $CONFIG_PATH"
     echo "  meta_path: $INSTALL_META"
-    echo "  cron_sync_tc: $ENABLE_CRON"
     echo "  result: 不会下载/解压/写入任何文件"
     exit 0
 fi
@@ -509,9 +407,6 @@ install_files
 write_default_config
 write_meta
 ensure_rich_dep
-ensure_vn_tools
-ensure_conntrack_tool
-ensure_cron
 init_hook_script
 
 echo "安装完成"
