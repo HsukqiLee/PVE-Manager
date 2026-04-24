@@ -193,21 +193,3 @@ def save_config(data, config_file):
     os.replace(tmp_file, config_file)
 
 
-def parse_days(s):
-    if not s or str(s).lower() == "all":
-        return list(range(1, 8))
-    res = set()
-    try:
-        for part in str(s).split(","):
-            part = part.strip()
-            if not part:
-                continue
-            if "-" in part:
-                start, end = map(int, part.split("-", 1))
-                res.update(range(start, end + 1))
-            else:
-                res.add(int(part))
-        valid = sorted([d for d in res if 1 <= d <= 7])
-        return valid if valid else list(range(1, 8))
-    except Exception:
-        return list(range(1, 8))

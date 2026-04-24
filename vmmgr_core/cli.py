@@ -6,7 +6,7 @@ import os
 from rich.panel import Panel
 from rich.table import Table
 
-from .config import default_config, load_config, parse_days, save_config
+from .config import default_config, load_config, save_config
 from .constants import DEFAULT_CONFIG_FILE
 from .ops import (
     apply_nat,
@@ -21,7 +21,7 @@ from .ops import (
 )
 from .policy import vmid_access
 from .rules import get_vm_conf, get_vm_ip, preview_rules, to_json, validate_config, validate_port_expr
-from .ui import console, format_bw, format_limits, get_os_nickname, has_hook, render_main_menu, render_submenu
+from .ui import console, get_os_nickname, has_hook, render_main_menu, render_submenu
 from .utils import audit
 
 
