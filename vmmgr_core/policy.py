@@ -32,7 +32,7 @@ def vmid_access(vmid, conf, operation, explicit=False, batch=False) -> Dict[str,
     op_name = str(operation).lower()
     op_policy = conf.get("settings", {}).get("operation_policy", {})
     scope_allowed_ops = op_policy.get("scope_allowed_ops", {})
-    vm_allowed_ops = [str(x).lower() for x in scope_allowed_ops.get("vm", ["general", "hook", "nat", "tc", "power", "limit", "nickname", "xpf", "preview"])]
+    vm_allowed_ops = [str(x).lower() for x in scope_allowed_ops.get("vm", ["general", "hook", "nat", "power", "nickname", "xpf", "preview"])]
     template_allowed_ops = [str(x).lower() for x in scope_allowed_ops.get("template", ["hook"])]
     outside_allowed_ops = [str(x).lower() for x in scope_allowed_ops.get("outside", [])]
     action_allowed_ops = op_policy.get("action_allowed_ops", {})

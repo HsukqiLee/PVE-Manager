@@ -14,7 +14,6 @@ from .ops import (
     ensure_hook_script,
     get_all_vms,
     handle_hook_event,
-    node_health,
     power_action,
     sync_all,
     parse_vms_str,
@@ -59,31 +58,22 @@ def show_features():
         "模块化拆分（config/policy/rules/ops/ui/cli）",
         "VMID 策略: vm/template/outside + allow/ignore/deny",
         "操作权限矩阵: scope_allowed_ops + action_allowed_ops 可细化到操作级",
-        "模板范围 VM 仅允许 hook，不允许端口转发与流控",
+        "模板范围 VM 仅允许 hook，不允许端口转发",
         "批量时自动忽略 ignore/outside/template；单点指定可按策略执行",
         "可命名额外转发 profile（按 VM 启停与范围覆写）",
         "端口冲突策略: priority-skip / priority-remap / strict-error",
         "validate 配置校验 + 冲突检测",
         "preview_rules 规则预览",
         "backup_config 配置备份",
-        "动态限速: vnstat 阈值触发 + 冷却 + 手动解除",
-        "流量图: vnstati 按小时/日/月导出",
-        "告警策略: CPU/内存/磁盘/连接数阈值",
-        "自动清理: 历史图表/快照按天保留",
-        "API 导出: 统一 schema 便于 Webhook 集成",
-        "命令路径可配置（pvesh/iptables/tc/qm/pct）",
+        "多 IP 作用域支持 (biz/mgmt)",
+        "实时 Guest Agent 网络审计",
+        "策略路由自动注入 (OPNsense 对称路由优化)",
+        "命令路径可配置（pvesh/iptables/qm/pct）",
         "行为参数可配置（默认 ssh/rdp 端口、postrouting cidr）",
     ]
     console.print(Panel("\n".join([f"- {x}" for x in items]), title="已支持功能", border_style="green"))
 
 
-def ensure_dyn_tc(conf):
-    settings = conf.setdefault("settings", {})
-    dyn = settings.setdefault("dynamic_tc", {})
-    dyn.setdefault("enabled", False)
-    dyn.setdefault("state_file", "/var/lib/vmmgr/dyn_tc_state.json")
-    dyn.setdefault("rules", [])
-    return dyn
 
 
 def handle_menus(cmd, conf, audit_mode=False):
