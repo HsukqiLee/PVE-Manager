@@ -127,6 +127,20 @@ def apply_nat(vmid, action, conf, explicit=True, batch=False):
     if not access["allow"]:
         return access["reason"]
 
+    if conf.get("settings", {}).get("behavior", {}).get("disable_nat", False):
+        # Even if disabled, we still want to ensure cleanup if 'del' action is requested
+        if action == "del":
+            iptables = cfg_cmd(conf, "iptables", "iptables")
+            iptables_save = cfg_cmd(conf, "iptables_save", "iptables-save")
+            tag = f"PVENAT-{vmid_str}"
+            with open(LOCK_FILE, "w", encoding="utf-8") as lockfile:
+                try:
+                    fcntl.flock(lockfile, fcntl.LOCK_EX)
+                    _delete_nat_rules(iptables, iptables_save, tag)
+                finally:
+                    fcntl.flock(lockfile, fcntl.LOCK_UN)
+        return "nat-disabled"
+
     vm_conf = get_vm_conf(conf, vmid_str)
     target_ip = get_vm_ip(vmid_str, conf, scope="biz")
     if target_ip == "None":
@@ -176,7 +190,7 @@ def apply_nat(vmid, action, conf, explicit=True, batch=False):
                         f"{target_ip}:{int_p}",
                     ]
                 )
-                # Optional SNAT rule to handle asymmetric routing if policy routing is not used/desired
+                # Optional SNAT rule
                 if use_snat:
                     run_cmd(
                         [
@@ -297,15 +311,23 @@ def sync_all(sync_type, full_reset, conf):
     iptables = cfg_cmd(conf, "iptables", "iptables")
     iptables_save = cfg_cmd(conf, "iptables_save", "iptables-save")
 
-    if full_reset:
+    disable_nat = conf.get("settings", {}).get("behavior", {}).get("disable_nat", False)
+
+    if full_reset or disable_nat:
+        # 1. Clean up global MASQUERADE
         chk = run_cmd([iptables, "-t", "nat", "-C", "POSTROUTING", "-s", str(cidr), "-o", str(iface_ext), "-j", "MASQUERADE"])
-        if chk.returncode != 0:
-            run_cmd([iptables, "-t", "nat", "-A", "POSTROUTING", "-s", str(cidr), "-o", str(iface_ext), "-j", "MASQUERADE"])
+        if chk.returncode == 0:
+            run_cmd([iptables, "-t", "nat", "-D", "POSTROUTING", "-s", str(cidr), "-o", str(iface_ext), "-j", "MASQUERADE"])
+        
+        # 2. Clean up all tagged rules
         with open(LOCK_FILE, "w", encoding="utf-8") as lockfile:
             fcntl.flock(lockfile, fcntl.LOCK_EX)
             _delete_nat_rules(iptables, iptables_save, "PVENAT-")
             fcntl.flock(lockfile, fcntl.LOCK_UN)
-        audit("Network full reset performed.")
+        
+        audit("Network NAT cleanup performed.")
+        if disable_nat:
+            return
 
     for vm in get_all_vms(conf):
         if vm.get("status") != "running":

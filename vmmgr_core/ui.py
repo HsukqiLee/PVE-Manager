@@ -58,8 +58,10 @@ def render_submenu(title, columns, extractor, opts, conf, all_vms):
 
 def render_main_menu(conf, all_vms, show_panel=True):
     compact = get_term_width() < 100
+    nat_disabled = conf.get("settings", {}).get("behavior", {}).get("disable_nat", False)
+    title_suffix = " [bold red](NAT功能已禁用)[/]" if nat_disabled else ""
     table = Table(
-        title="[bold white]虚拟机实时状态汇总[/bold white]",
+        title=f"[bold white]虚拟机实时状态汇总[/bold white]{title_suffix}",
         box=box.ROUNDED,
         border_style="blue",
         expand=True,
