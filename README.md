@@ -49,4 +49,4 @@ chmod +x install.sh update.sh
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=HsukqiLee/PVE-Manager&type=Date)](https://star-history.com/#HsukqiLee/PVE-Manager&Date)
+[![Star History Chart](https://star-history.tsinbei.com/svg?repos=HsukqiLee/PVE-Manager&type=Date)](https://star-history.tsinbei.com/#HsukqiLee/PVE-Manager&type=date)
